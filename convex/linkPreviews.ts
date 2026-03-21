@@ -6,12 +6,35 @@ import net from "node:net";
 import { v } from "convex/values";
 
 import { internal } from "./_generated/api";
-import { internalAction } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
+import { internalAction, type ActionCtx } from "./_generated/server";
 
 const FETCH_TIMEOUT_MS = 5_000;
 const MAX_REDIRECTS = 5;
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+const YOUTUBE_HOSTNAMES = new Set([
+  "youtube.com",
+  "www.youtube.com",
+  "m.youtube.com",
+]);
+const YOUTUBE_THUMBNAIL_FILENAMES = [
+  "maxresdefault.jpg",
+  "hqdefault.jpg",
+  "mqdefault.jpg",
+  "default.jpg",
+] as const;
+
+type Preview = {
+  title?: string;
+  description?: string;
+  image?: string;
+};
+
+type YouTubeVideo = {
+  videoId: string;
+  canonicalUrl: string;
+};
 
 export const scrapeEntry = internalAction({
   args: {
@@ -24,23 +47,32 @@ export const scrapeEntry = internalAction({
 
     try {
       const normalizedUrl = normalizeHttpUrl(args.url);
-      const { html, finalUrl } = await fetchHtml(normalizedUrl);
-      const preview = extractPreview(html, finalUrl);
-      const hasPreview =
-        preview.title !== undefined ||
-        preview.description !== undefined ||
-        preview.image !== undefined;
+      const youtubeVideo = parseYouTubeVideoUrl(normalizedUrl);
+      let youtubePreviewFailed = false;
+      const previewResult =
+        (youtubeVideo
+          ? await fetchYouTubePreview(youtubeVideo).catch((error) => {
+              youtubePreviewFailed = true;
+              console.warn("YouTube preview lookup failed, falling back to HTML.", {
+                url: args.url,
+                videoId: youtubeVideo.videoId,
+                error: getErrorMessage(error),
+              });
+              return null;
+            })
+          : null) ?? (await fetchGenericPreview(normalizedUrl));
 
-      await ctx.runMutation(internal.entries.saveLinkPreview, {
+      if (youtubePreviewFailed) {
+        console.info("Generic preview fallback used for YouTube URL.", {
+          url: args.url,
+        });
+      }
+
+      await savePreview(ctx, {
         entryId: args.entryId,
-        metadata: {
-          url: finalUrl,
-          scrapeStatus: hasPreview ? "success" : "failed",
-          scrapedAt,
-          ...(preview.title ? { title: preview.title } : {}),
-          ...(preview.description ? { description: preview.description } : {}),
-          ...(preview.image ? { image: preview.image } : {}),
-        },
+        url: youtubeVideo ? args.url : previewResult.url,
+        preview: previewResult.preview,
+        scrapedAt,
       });
     } catch {
       await ctx.runMutation(internal.entries.saveLinkPreview, {
@@ -51,11 +83,61 @@ export const scrapeEntry = internalAction({
           scrapedAt,
         },
       });
+      console.error("Link preview scrape failed.", {
+        url: args.url,
+      });
     }
 
     return null;
   },
 });
+
+async function savePreview(
+  ctx: ActionCtx,
+  args: {
+    entryId: Id<"entries">;
+    url: string;
+    preview: Preview;
+    scrapedAt: number;
+  },
+) {
+  const hasPreview =
+    args.preview.title !== undefined ||
+    args.preview.description !== undefined ||
+    args.preview.image !== undefined;
+
+  console.info("Saving link preview metadata.", {
+    entryId: args.entryId,
+    url: args.url,
+    scrapeStatus: hasPreview ? "success" : "failed",
+    title: args.preview.title,
+    hasDescription: args.preview.description !== undefined,
+    image: args.preview.image,
+  });
+
+  await ctx.runMutation(internal.entries.saveLinkPreview, {
+    entryId: args.entryId,
+    metadata: {
+      url: args.url,
+      scrapeStatus: hasPreview ? "success" : "failed",
+      scrapedAt: args.scrapedAt,
+      ...(args.preview.title ? { title: args.preview.title } : {}),
+      ...(args.preview.description
+        ? { description: args.preview.description }
+        : {}),
+      ...(args.preview.image ? { image: args.preview.image } : {}),
+    },
+  });
+}
+
+async function fetchGenericPreview(url: string) {
+  const { html, finalUrl } = await fetchHtml(url);
+
+  return {
+    url: finalUrl,
+    preview: extractPreview(html, finalUrl),
+  };
+}
 
 async function fetchHtml(url: string) {
   let currentUrl = url;
@@ -100,6 +182,93 @@ async function fetchHtml(url: string) {
   }
 
   throw new Error("Too many redirects while fetching preview.");
+}
+
+async function fetchYouTubePreview(video: YouTubeVideo) {
+  const { html, finalUrl } = await fetchHtml(video.canonicalUrl);
+  const preview = extractPreview(html, finalUrl);
+  const rawMetaTitle = extractRawMetaContent(html, [
+    ["property", "og:title"],
+    ["name", "twitter:title"],
+    ["name", "title"],
+    ["itemprop", "name"],
+  ]);
+  const playerTitle = extractYouTubePlayerTitle(html, video.videoId);
+  const documentTitle = extractTitle(html);
+  const title =
+    sanitizeYouTubeTitle(rawMetaTitle) ??
+    sanitizeYouTubeTitle(playerTitle) ??
+    sanitizeYouTubeTitle(documentTitle) ??
+    sanitizeYouTubeTitle(preview.title);
+  const image = await resolveYouTubeThumbnail(video.videoId, preview.image);
+
+  console.info("YouTube preview extraction result.", {
+    videoId: video.videoId,
+    canonicalUrl: finalUrl,
+    rawMetaTitle,
+    previewTitle: preview.title,
+    playerTitle,
+    documentTitle,
+    finalTitle: title,
+    previewImage: preview.image,
+    finalImage: image,
+  });
+
+  if (!title && !image) {
+    throw new Error("YouTube watch page did not include preview data.");
+  }
+
+  return {
+    url: video.canonicalUrl,
+    preview: {
+      ...(title ? { title } : {}),
+      ...(image ? { image } : {}),
+    },
+  };
+}
+
+async function resolveYouTubeThumbnail(videoId: string, fallbackImage?: string) {
+  const [preferredFilename, ...fallbackFilenames] = YOUTUBE_THUMBNAIL_FILENAMES;
+  const preferredImageUrl = `https://i.ytimg.com/vi/${videoId}/${preferredFilename}`;
+
+  if (await isUsableImage(preferredImageUrl)) {
+    return preferredImageUrl;
+  }
+
+  if (fallbackImage) {
+    return fallbackImage;
+  }
+
+  for (const filename of fallbackFilenames) {
+    const imageUrl = `https://i.ytimg.com/vi/${videoId}/${filename}`;
+
+    if (await isUsableImage(imageUrl)) {
+      return imageUrl;
+    }
+  }
+
+  return undefined;
+}
+
+async function isUsableImage(url: string) {
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      headers: {
+        "user-agent": DEFAULT_USER_AGENT,
+      },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    return contentType.startsWith("image/");
+  } catch {
+    return false;
+  }
 }
 
 async function assertPublicHttpUrl(url: string) {
@@ -231,6 +400,7 @@ function extractPreview(html: string, pageUrl: string) {
   const title =
     findMetaContent(metaTags, "property", "og:title") ??
     findMetaContent(metaTags, "name", "twitter:title") ??
+    findMetaContent(metaTags, "name", "title") ??
     findMetaContent(metaTags, "itemprop", "name") ??
     extractJsonLdText(jsonLdBlocks, ["headline", "name"]) ??
     extractTitle(html);
@@ -253,6 +423,139 @@ function extractPreview(html: string, pageUrl: string) {
     ...(description ? { description } : {}),
     ...(image ? { image } : {}),
   };
+}
+
+function extractYouTubePlayerTitle(html: string, videoId: string) {
+  const escapedVideoId = escapeRegExp(videoId);
+  const exactVideoDetailsMatch = html.match(
+    new RegExp(
+      `"videoDetails":\\{"videoId":"${escapedVideoId}","title":"((?:\\\\.|[^"\\\\])*)"`,
+    ),
+  );
+
+  if (exactVideoDetailsMatch?.[1]) {
+    return decodeJsonString(exactVideoDetailsMatch[1]);
+  }
+
+  const overlayTitleMatch = html.match(
+    /"playerOverlayVideoDetailsRenderer":\{"title":\{"simpleText":"((?:\\.|[^"\\])*)"/,
+  );
+
+  if (overlayTitleMatch?.[1]) {
+    return decodeJsonString(overlayTitleMatch[1]);
+  }
+
+  const match = html.match(
+    /"videoDetails":\{[\s\S]*?"title":"((?:\\.|[^"\\])*)"/,
+  );
+
+  if (!match?.[1]) {
+    return undefined;
+  }
+
+  return decodeJsonString(match[1]);
+}
+
+function decodeJsonString(value: string) {
+  try {
+    return cleanText(JSON.parse(`"${value}"`));
+  } catch {
+    return cleanText(value.replace(/\\"/g, '"'));
+  }
+}
+
+function sanitizeYouTubeTitle(title: string | undefined) {
+  const cleanedTitle = cleanText(title);
+
+  if (!cleanedTitle) {
+    return undefined;
+  }
+
+  if (/^-+\s*youtube$/i.test(cleanedTitle)) {
+    return undefined;
+  }
+
+  const withoutSuffix = cleanedTitle.replace(/\s+-\s+YouTube$/i, "").trim();
+
+  if (
+    !withoutSuffix ||
+    withoutSuffix === "-" ||
+    /^youtube$/i.test(withoutSuffix)
+  ) {
+    return undefined;
+  }
+
+  return withoutSuffix;
+}
+
+function extractRawMetaContent(
+  html: string,
+  selectors: Array<[attributeName: string, attributeValue: string]>,
+) {
+  for (const [attributeName, attributeValue] of selectors) {
+    const match = html.match(
+      new RegExp(
+        `<meta\\b(?=[^>]*\\b${attributeName}=["']${escapeRegExp(attributeValue)}["'])(?=[^>]*\\bcontent=["']([^"']*)["'])[^>]*>`,
+        "i",
+      ),
+    );
+
+    const content = cleanText(match?.[1]);
+    if (content) {
+      return content;
+    }
+  }
+
+  return undefined;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseYouTubeVideoUrl(url: string): YouTubeVideo | null {
+  const parsedUrl = normalizeUrl(url);
+  const hostname = parsedUrl.hostname.toLowerCase();
+
+  if (hostname === "youtu.be") {
+    const videoId = parsedUrl.pathname.split("/").filter(Boolean)[0];
+    return buildYouTubeVideo(videoId);
+  }
+
+  if (!YOUTUBE_HOSTNAMES.has(hostname)) {
+    return null;
+  }
+
+  const pathSegments = parsedUrl.pathname.split("/").filter(Boolean);
+
+  if (parsedUrl.pathname === "/watch") {
+    return buildYouTubeVideo(parsedUrl.searchParams.get("v"));
+  }
+
+  if (pathSegments[0] === "shorts" || pathSegments[0] === "embed") {
+    return buildYouTubeVideo(pathSegments[1]);
+  }
+
+  return null;
+}
+
+function buildYouTubeVideo(videoId: string | null | undefined): YouTubeVideo | null {
+  if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    return null;
+  }
+
+  return {
+    videoId,
+    canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
+  };
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
 }
 
 function parseAttributes(tag: string) {

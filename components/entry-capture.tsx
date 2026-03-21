@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "convex/react";
 
 import {
@@ -292,6 +292,7 @@ function LinkPreviewCard({
   onDeleteRequest: (entry: Entry) => void;
 }) {
   const metadata = entry.metadata ?? {};
+  const isYouTube = isYouTubeUrl(metadata.url);
   const hostname = getHostname(metadata.url);
   const title = metadata.title ?? hostname ?? entry.content;
   const description =
@@ -305,7 +306,11 @@ function LinkPreviewCard({
   return (
     <article className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm transition-transform duration-200 hover:-translate-y-0.5">
       <div className="flex items-start justify-between gap-4 px-5 pt-5">
-        <EntryMeta entry={entry} label="link" />
+        <EntryMeta
+          entry={entry}
+          label="link"
+          badge={isYouTube ? <YouTubeBadge /> : undefined}
+        />
         <EntryActions
           entry={entry}
           isDeleting={isDeleting}
@@ -347,15 +352,19 @@ function LinkPreviewCard({
           </p>
 
           <div className="mt-5 flex items-center justify-between gap-4 text-sm">
-            <span className="truncate font-medium text-card-foreground">
-              {hostname ?? metadata.url}
-            </span>
+            {!isYouTube ? (
+              <span className="truncate font-medium text-card-foreground">
+                {hostname ?? metadata.url}
+              </span>
+            ) : (
+              <span aria-hidden="true" />
+            )}
             <span className="shrink-0 text-muted-foreground">
               {getLinkStatusLabel(metadata.scrapeStatus)}
             </span>
           </div>
 
-          {metadata.url ? (
+          {metadata.url && !isYouTube ? (
             <p className="mt-2 truncate text-xs text-muted-foreground">
               {metadata.url}
             </p>
@@ -369,15 +378,19 @@ function LinkPreviewCard({
 function EntryMeta({
   entry,
   label = entry.type,
+  badge,
 }: {
   entry: Entry;
   label?: string;
+  badge?: ReactNode;
 }) {
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-3">
-      <span className="rounded-full bg-secondary px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-secondary-foreground">
-        {label}
-      </span>
+      {badge ?? (
+        <span className="rounded-full bg-secondary px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-secondary-foreground">
+          {label}
+        </span>
+      )}
       <time className="text-sm text-muted-foreground">
         {new Date(entry._creationTime).toLocaleString()}
       </time>
@@ -432,6 +445,35 @@ function getHostname(url: string | undefined) {
   } catch {
     return null;
   }
+}
+
+function isYouTubeUrl(url: string | undefined) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+    return hostname === "youtube.com" || hostname === "m.youtube.com" || hostname === "youtu.be";
+  } catch {
+    return false;
+  }
+}
+
+function YouTubeBadge() {
+  return (
+    <span className="inline-flex items-center gap-2 rounded-full bg-[#ff0033] px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-white shadow-sm">
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 24 24"
+        className="h-3.5 w-3.5 shrink-0"
+        fill="currentColor"
+      >
+        <path d="M23.5 7.3a3 3 0 0 0-2.1-2.1C19.5 4.7 12 4.7 12 4.7s-7.5 0-9.4.5A3 3 0 0 0 .5 7.3 31.4 31.4 0 0 0 0 12a31.4 31.4 0 0 0 .5 4.7 3 3 0 0 0 2.1 2.1c1.9.5 9.4.5 9.4.5s7.5 0 9.4-.5a3 3 0 0 0 2.1-2.1A31.4 31.4 0 0 0 24 12a31.4 31.4 0 0 0-.5-4.7ZM9.6 15.4V8.6l5.8 3.4-5.8 3.4Z" />
+      </svg>
+      YouTube Video
+    </span>
+  );
 }
 
 function getLinkStatusLabel(
