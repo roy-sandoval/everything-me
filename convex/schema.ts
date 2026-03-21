@@ -11,7 +11,15 @@ export default defineSchema({
         description: v.optional(v.string()),
         image: v.optional(v.string()),
         url: v.optional(v.string()),
+        scrapeStatus: v.optional(
+          v.union(
+            v.literal("pending"),
+            v.literal("success"),
+            v.literal("failed"),
+          ),
+        ),
+        scrapedAt: v.optional(v.number()),
       }),
     ),
-  }),
+  }).index("by_type", ["type"]),
 });
