@@ -184,7 +184,7 @@ function ConnectedEntryCapture() {
               </p>
             </div>
 
-            <div className="space-y-3">
+            <div className="flex flex-col items-center gap-4">
               {entries?.length ? (
                 entries.map((entry) => (
                   <EntryCard
@@ -195,7 +195,7 @@ function ConnectedEntryCapture() {
                   />
                 ))
               ) : (
-                <div className="rounded-3xl border border-dashed border-border bg-card/40 p-8 text-center text-muted-foreground">
+                <div className="w-full max-w-[20rem] rounded-[2.25rem] border border-dashed border-border bg-card/40 p-8 text-center text-muted-foreground">
                   {entries
                     ? "No entries yet. Save your first one above."
                     : "Loading entries..."}
@@ -266,7 +266,7 @@ function EntryCard({
   }
 
   return (
-    <article className="rounded-3xl border border-border bg-card p-5 shadow-sm">
+    <article className="w-full max-w-[20rem] rounded-[2.25rem] border border-border bg-card p-5 shadow-sm">
       <div className="flex items-start justify-between gap-4">
         <EntryMeta entry={entry} />
         <EntryActions
@@ -304,19 +304,7 @@ function LinkPreviewCard({
         : entry.content);
 
   return (
-    <article className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm transition-transform duration-200 hover:-translate-y-0.5">
-      <div className="flex items-start justify-between gap-4 px-5 pt-5">
-        <EntryMeta
-          entry={entry}
-          label="link"
-          badge={isYouTube ? <YouTubeBadge /> : undefined}
-        />
-        <EntryActions
-          entry={entry}
-          isDeleting={isDeleting}
-          onDeleteRequest={onDeleteRequest}
-        />
-      </div>
+    <article className="w-full max-w-[20rem] overflow-hidden rounded-[2.25rem] border border-border bg-card shadow-sm transition-transform duration-200 hover:-translate-y-0.5">
       <a
         href={metadata.url}
         target="_blank"
@@ -324,7 +312,7 @@ function LinkPreviewCard({
         className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       >
         {metadata.image ? (
-          <div className="relative mt-4 h-48 w-full overflow-hidden bg-muted">
+          <div className="relative h-48 w-full overflow-hidden bg-muted">
             {/* eslint-disable-next-line @next/next/no-img-element -- Open Graph images come from arbitrary hosts. */}
             <img
               src={metadata.image}
@@ -336,39 +324,28 @@ function LinkPreviewCard({
             <div className="absolute inset-0 bg-gradient-to-t from-black/30 via-black/5 to-transparent" />
           </div>
         ) : (
-          <div className="mt-4 flex h-32 items-end bg-[linear-gradient(135deg,rgba(15,23,42,0.08),rgba(15,23,42,0.02),rgba(15,23,42,0.12))] p-5">
+          <div className="flex h-32 items-end bg-[linear-gradient(135deg,rgba(15,23,42,0.08),rgba(15,23,42,0.02),rgba(15,23,42,0.12))] p-5">
             <span className="rounded-full bg-background/90 px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-foreground shadow-sm">
               {hostname ?? "link"}
             </span>
           </div>
         )}
 
-        <div className="p-5">
-          <h3 className="mt-4 text-xl font-semibold tracking-tight text-card-foreground">
-            {title}
-          </h3>
+        <div className="p-2 pb-5">
+          {isYouTube ? <div><YouTubeBadge /></div> : null}
+          <div className="mt-4 flex items-start justify-between gap-4">
+            <h3 className="min-w-0 flex-1 text-[1.75rem] font-semibold leading-none tracking-tight text-card-foreground">
+              {title}
+            </h3>
+            <EntryActions
+              entry={entry}
+              isDeleting={isDeleting}
+              onDeleteRequest={onDeleteRequest}
+            />
+          </div>
           <p className="mt-2 line-clamp-3 break-words text-sm leading-6 text-muted-foreground">
             {description}
           </p>
-
-          <div className="mt-5 flex items-center justify-between gap-4 text-sm">
-            {!isYouTube ? (
-              <span className="truncate font-medium text-card-foreground">
-                {hostname ?? metadata.url}
-              </span>
-            ) : (
-              <span aria-hidden="true" />
-            )}
-            <span className="shrink-0 text-muted-foreground">
-              {getLinkStatusLabel(metadata.scrapeStatus)}
-            </span>
-          </div>
-
-          {metadata.url && !isYouTube ? (
-            <p className="mt-2 truncate text-xs text-muted-foreground">
-              {metadata.url}
-            </p>
-          ) : null}
         </div>
       </a>
     </article>
@@ -412,11 +389,20 @@ function EntryActions({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="rounded-full border border-border px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="cursor-pointer rounded-full border border-border p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={isDeleting}
           aria-label={`Open actions for this ${entry.type} entry`}
         >
-          Actions
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            className="h-4 w-4"
+            fill="currentColor"
+          >
+            <circle cx="5" cy="12" r="1.75" />
+            <circle cx="12" cy="12" r="1.75" />
+            <circle cx="19" cy="12" r="1.75" />
+          </svg>
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
@@ -474,17 +460,4 @@ function YouTubeBadge() {
       YouTube Video
     </span>
   );
-}
-
-function getLinkStatusLabel(
-  status: "pending" | "success" | "failed" | undefined,
-) {
-  switch (status) {
-    case "pending":
-      return "Fetching preview";
-    case "failed":
-      return "Preview unavailable";
-    default:
-      return "Open link";
-  }
 }
