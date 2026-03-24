@@ -79,3 +79,29 @@ textarea {
   background-position: center;
   background-size: 32px 32px, 32px 32px, 100% 100%;
 }
+
+@keyframes canvas-stagger-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes canvas-stagger-in {
+    from {
+      opacity: 1;
+      transform: none;
+    }
+
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}

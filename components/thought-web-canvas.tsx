@@ -4,6 +4,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -44,6 +45,16 @@ const MIN_VIEWPORT_SCALE = 0.5;
 const MAX_VIEWPORT_SCALE = 2.5;
 const PAN_GESTURE_THRESHOLD = 3;
 const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+const DATE_HEADING_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+});
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+});
 
 const NODE_LABEL_STYLES: Record<
   NodeLabel,
@@ -154,6 +165,16 @@ type ViewportState = {
   scale: number;
 };
 
+type ViewMode = "general" | "date";
+
+type DateGroup = {
+  key: string;
+  dayStart: number;
+  label: string;
+  isToday: boolean;
+  nodes: NodeDoc[];
+};
+
 export function ThoughtWebCanvas() {
   if (!convexUrl) {
     return <MissingConvexState />;
@@ -211,6 +232,7 @@ function ConnectedThoughtWebCanvas() {
   const [extractFeedback, setExtractFeedback] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isExtractorOpen, setIsExtractorOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("general");
 
   const nodes = canvas?.nodes ?? [];
   const connections = canvas?.connections ?? [];
@@ -234,6 +256,18 @@ function ConnectedThoughtWebCanvas() {
   useEffect(() => {
     viewportRef.current = viewport;
   }, [viewport]);
+
+  useEffect(() => {
+    if (viewMode !== "date") {
+      return;
+    }
+
+    setComposer(null);
+    setConnectionState(null);
+    setContextMenu(null);
+    setPanState(null);
+    setIsExtractorOpen(false);
+  }, [viewMode]);
 
   useEffect(() => {
     if (!canvas) {
@@ -1140,6 +1174,8 @@ function ConnectedThoughtWebCanvas() {
     });
   }
 
+  const todayKey = getLocalDateKey(Date.now());
+  const dateGroups = getDateGroups(nodes, todayKey);
   const previewStartPoint = connectionState
     ? getPreviewStartPoint(
         connectionState.fromId,
@@ -1156,175 +1192,279 @@ function ConnectedThoughtWebCanvas() {
       ref={canvasRef}
       className={cn(
         "canvas-grid relative h-screen overflow-hidden",
-        panState ? "cursor-grabbing" : "cursor-grab",
+        viewMode === "general"
+          ? panState
+            ? "cursor-grabbing"
+            : "cursor-grab"
+          : "cursor-default",
       )}
-      style={{ touchAction: "none" }}
+      style={{ touchAction: viewMode === "general" ? "none" : "auto" }}
       onPointerDownCapture={handleOutsidePointerDown}
-      onPointerDown={handleCanvasPointerDown}
-      onClick={handleCanvasClick}
-      onDoubleClick={handleCanvasDoubleClick}
-      onContextMenu={handleCanvasContextMenu}
-      onWheel={handleCanvasWheel}
+      onPointerDown={viewMode === "general" ? handleCanvasPointerDown : undefined}
+      onClick={viewMode === "general" ? handleCanvasClick : undefined}
+      onDoubleClick={viewMode === "general" ? handleCanvasDoubleClick : undefined}
+      onContextMenu={viewMode === "general" ? handleCanvasContextMenu : undefined}
+      onWheel={viewMode === "general" ? handleCanvasWheel : undefined}
     >
-      <div
-        className="pointer-events-none absolute inset-0"
-        style={{
-          transform: `translate(${sceneOrigin.x}px, ${sceneOrigin.y}px) scale(${viewport.scale})`,
-          transformOrigin: "0 0",
-        }}
-      >
-        <svg
-          className="pointer-events-none absolute inset-0 h-full w-full"
-          style={{ overflow: "visible" }}
+      {viewMode === "general" ? (
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            transform: `translate(${sceneOrigin.x}px, ${sceneOrigin.y}px) scale(${viewport.scale})`,
+            transformOrigin: "0 0",
+          }}
         >
-          {connections.map((connection) => {
-            const points = getConnectionPoints(
-              connection,
-              nodes,
-              positionOverrides,
-              nodeSizes,
-            );
+          <svg
+            className="pointer-events-none absolute inset-0 h-full w-full"
+            style={{ overflow: "visible" }}
+          >
+            {connections.map((connection) => {
+              const points = getConnectionPoints(
+                connection,
+                nodes,
+                positionOverrides,
+                nodeSizes,
+              );
 
-            if (!points) {
-              return null;
-            }
+              if (!points) {
+                return null;
+              }
 
-            return (
+              return (
+                <line
+                  key={connection._id}
+                  x1={points.start.x}
+                  y1={points.start.y}
+                  x2={points.end.x}
+                  y2={points.end.y}
+                  stroke="rgb(121 239 229 / 0.55)"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+              );
+            })}
+            {connectionState && previewStartPoint ? (
               <line
-                key={connection._id}
-                x1={points.start.x}
-                y1={points.start.y}
-                x2={points.end.x}
-                y2={points.end.y}
-                stroke="rgb(121 239 229 / 0.55)"
+                x1={previewStartPoint.x}
+                y1={previewStartPoint.y}
+                x2={connectionState.pointer.x}
+                y2={connectionState.pointer.y}
+                stroke="rgb(255 255 255 / 0.8)"
                 strokeWidth="2"
+                strokeDasharray="7 6"
                 strokeLinecap="round"
               />
-            );
-          })}
-          {connectionState && previewStartPoint ? (
-            <line
-              x1={previewStartPoint.x}
-              y1={previewStartPoint.y}
-              x2={connectionState.pointer.x}
-              y2={connectionState.pointer.y}
-              stroke="rgb(255 255 255 / 0.8)"
-              strokeWidth="2"
-              strokeDasharray="7 6"
-              strokeLinecap="round"
+            ) : null}
+          </svg>
+
+          {composer ? (
+            <InlineTextCard
+              textareaRef={composerRef}
+              position={composer}
+              value={composer.text}
+              error={composer.error}
+              buttonLabel={isCreatingNode ? "Saving..." : "Save"}
+              disabled={isCreatingNode}
+              placeholder="Type a thought..."
+              onChange={handleComposerChange}
+              onKeyDown={handleComposerKeyDown}
+              onSubmit={() => void submitComposer()}
             />
           ) : null}
-        </svg>
 
-        {composer ? (
-          <InlineTextCard
-            textareaRef={composerRef}
-            position={composer}
-            value={composer.text}
-            error={composer.error}
-            buttonLabel={isCreatingNode ? "Saving..." : "Save"}
-            disabled={isCreatingNode}
-            placeholder="Type a thought..."
-            onChange={handleComposerChange}
-            onKeyDown={handleComposerKeyDown}
-            onSubmit={() => void submitComposer()}
-          />
-        ) : null}
+          {nodes.map((node, index) => (
+            <NodeCard
+              key={node._id}
+              node={node}
+              animationStyle={getStaggerStyle(index, 18)}
+              position={getNodePosition(node, positionOverrides)}
+              isConnectionSource={connectionState?.fromId === node._id}
+              isConnectionTarget={connectionState?.hoverId === node._id}
+              isEditing={editState?.nodeId === node._id}
+              editValue={editState?.nodeId === node._id ? editState.text : ""}
+              editError={editState?.nodeId === node._id ? editState.error : null}
+              isDeleting={isDeletingNode === node._id}
+              isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
+              onPointerDown={handleNodePointerDown}
+              onDoubleClick={handleNodeDoubleClick}
+              onContextMenu={handleNodeContextMenu}
+              onConnectionPointerDown={handleConnectionPointerDown}
+              onSizeChange={handleNodeSizeChange}
+              onEditChange={handleEditChange}
+              onEditKeyDown={handleEditKeyDown}
+              onEditSubmit={() => void submitEdit()}
+            />
+          ))}
 
-        {nodes.map((node) => (
-          <NodeCard
-            key={node._id}
-            node={node}
-            position={getNodePosition(node, positionOverrides)}
-            isConnectionSource={connectionState?.fromId === node._id}
-            isConnectionTarget={connectionState?.hoverId === node._id}
-            isEditing={editState?.nodeId === node._id}
-            editValue={editState?.nodeId === node._id ? editState.text : ""}
-            editError={editState?.nodeId === node._id ? editState.error : null}
-            isDeleting={isDeletingNode === node._id}
-            isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
-            onPointerDown={handleNodePointerDown}
-            onDoubleClick={handleNodeDoubleClick}
-            onContextMenu={handleNodeContextMenu}
-            onConnectionPointerDown={handleConnectionPointerDown}
-            onSizeChange={handleNodeSizeChange}
-            onEditChange={handleEditChange}
-            onEditKeyDown={handleEditKeyDown}
-            onEditSubmit={() => void submitEdit()}
-          />
-        ))}
+          {contextMenu ? (
+            <div
+              className="pointer-events-auto absolute z-40 rounded-2xl border border-white/12 bg-[rgb(11_16_26_/_0.97)] p-1.5 shadow-[0_20px_50px_rgba(0,0,0,0.4)] backdrop-blur"
+              style={{
+                left: contextMenu.x,
+                top: contextMenu.y,
+                width: CONTEXT_MENU_WIDTH,
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              {contextMenu.kind === "node" ? (
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isDeletingNode === contextMenu.nodeId}
+                  onClick={() => void handleDeleteNode(contextMenu.nodeId)}
+                >
+                  <span>Delete node</span>
+                  <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
+                    Del
+                  </span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isClearingCanvas}
+                  onClick={() => {
+                    setContextMenu(null);
+                    setIsClearDialogOpen(true);
+                  }}
+                >
+                  <span>Clear all nodes</span>
+                  <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
+                    Del
+                  </span>
+                </button>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="absolute inset-0 overflow-y-auto px-6 pt-28 pb-28">
+          <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
+            {dateGroups.length > 0 ? (
+              dateGroups.map((group, groupIndex) => (
+                <section
+                  key={group.key}
+                  className="rounded-[1.9rem] border border-white/10 bg-black/20 p-5 shadow-[0_20px_70px_rgba(0,0,0,0.24)] backdrop-blur-sm"
+                  style={getStaggerStyle(groupIndex, 55)}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {group.isToday ? (
+                          <span className="rounded-full bg-cyan-300 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-950">
+                            Today
+                          </span>
+                        ) : null}
+                        <h2 className="text-lg font-semibold text-white">
+                          {group.label}
+                        </h2>
+                      </div>
+                      <p className="mt-1 text-sm text-white/55">
+                        {group.nodes.length} {group.nodes.length === 1 ? "entry" : "entries"}
+                      </p>
+                    </div>
+                  </div>
 
-        {contextMenu ? (
-          <div
-            className="pointer-events-auto absolute z-40 rounded-2xl border border-white/12 bg-[rgb(11_16_26_/_0.97)] p-1.5 shadow-[0_20px_50px_rgba(0,0,0,0.4)] backdrop-blur"
-            style={{
-              left: contextMenu.x,
-              top: contextMenu.y,
-              width: CONTEXT_MENU_WIDTH,
-            }}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            {contextMenu.kind === "node" ? (
-              <button
-                type="button"
-                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={isDeletingNode === contextMenu.nodeId}
-                onClick={() => void handleDeleteNode(contextMenu.nodeId)}
-              >
-                <span>Delete node</span>
-                <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
-                  Del
-                </span>
-              </button>
+                  <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {group.nodes.map((node, nodeIndex) => (
+                      <DateNodeCard
+                        key={node._id}
+                        node={node}
+                        animationStyle={getStaggerStyle(groupIndex + nodeIndex + 1, 38)}
+                        isEditing={editState?.nodeId === node._id}
+                        editValue={editState?.nodeId === node._id ? editState.text : ""}
+                        editError={editState?.nodeId === node._id ? editState.error : null}
+                        isDeleting={isDeletingNode === node._id}
+                        isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
+                        onDoubleClick={handleNodeDoubleClick}
+                        onDelete={() => void handleDeleteNode(node._id)}
+                        onEditChange={handleEditChange}
+                        onEditKeyDown={handleEditKeyDown}
+                        onEditSubmit={() => void submitEdit()}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ))
             ) : (
-              <button
-                type="button"
-                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={isClearingCanvas}
-                onClick={() => {
-                  setContextMenu(null);
-                  setIsClearDialogOpen(true);
-                }}
-              >
-                <span>Clear all nodes</span>
-                <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
-                  Del
-                </span>
-              </button>
+              <div className="rounded-[1.9rem] border border-white/10 bg-black/20 p-8 text-white/70 shadow-[0_20px_70px_rgba(0,0,0,0.24)] backdrop-blur-sm">
+                <p className="text-sm uppercase tracking-[0.24em] text-cyan-100/70">
+                  By Date
+                </p>
+                <h2 className="mt-3 text-2xl font-semibold text-white">
+                  No entries yet.
+                </h2>
+                <p className="mt-3 max-w-2xl text-sm leading-6">
+                  Switch back to General to create a node or import a conversation,
+                  then come here to browse everything by the day it was entered.
+                </p>
+              </div>
             )}
           </div>
-        ) : null}
-      </div>
+        </div>
+      )}
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-6">
-        <div className="rounded-full border border-white/10 bg-black/25 px-4 py-2 text-xs uppercase tracking-[0.28em] text-white/70 backdrop-blur-sm">
-          Paste to extract. Double-click to make a node. Drag to pan. Scroll to
-          zoom.
+        <div className="pointer-events-auto flex items-center gap-3 rounded-[1.2rem] border border-white/10 bg-black/30 px-3 py-3 text-white/75 backdrop-blur-sm">
+          <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
+            <button
+              type="button"
+              className={cn(
+                "rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-[0.24em] transition",
+                viewMode === "general"
+                  ? "bg-cyan-300 text-slate-950"
+                  : "text-white/65 hover:bg-white/[0.06] hover:text-white",
+              )}
+              onClick={() => setViewMode("general")}
+            >
+              General
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-[0.24em] transition",
+                viewMode === "date"
+                  ? "bg-cyan-300 text-slate-950"
+                  : "text-white/65 hover:bg-white/[0.06] hover:text-white",
+              )}
+              onClick={() => setViewMode("date")}
+            >
+              By Date
+            </button>
+          </div>
+          <div className="hidden h-8 w-px bg-white/10 sm:block" />
+          <div className="hidden text-xs uppercase tracking-[0.28em] text-white/60 sm:block">
+            {viewMode === "general"
+              ? "Paste to extract. Double-click to make a node. Drag to pan. Scroll to zoom."
+              : "Browse entries by day. Double-click a card to edit it."}
+          </div>
         </div>
       </div>
 
-      <ExtractorShell>
-        <ExtractorPanel
-          isOpen={isExtractorOpen}
-          value={extractInput}
-          error={extractError}
-          feedback={extractFeedback}
-          disabled={isExtracting}
-          onOpen={handleOpenExtractor}
-          onClose={handleCloseExtractor}
-          onChange={(value) => {
-            setExtractInput(value);
-            setExtractError(null);
-            setExtractFeedback(null);
-          }}
-          onClear={() => {
-            setExtractInput("");
-            setExtractError(null);
-            setExtractFeedback(null);
-          }}
-          onSubmit={() => void handleExtract()}
-        />
-      </ExtractorShell>
+      {viewMode === "general" ? (
+        <ExtractorShell>
+          <ExtractorPanel
+            isOpen={isExtractorOpen}
+            value={extractInput}
+            error={extractError}
+            feedback={extractFeedback}
+            disabled={isExtracting}
+            onOpen={handleOpenExtractor}
+            onClose={handleCloseExtractor}
+            onChange={(value) => {
+              setExtractInput(value);
+              setExtractError(null);
+              setExtractFeedback(null);
+            }}
+            onClear={() => {
+              setExtractInput("");
+              setExtractError(null);
+              setExtractFeedback(null);
+            }}
+            onSubmit={() => void handleExtract()}
+          />
+        </ExtractorShell>
+      ) : null}
 
       <div className="pointer-events-none absolute bottom-0 left-0 z-10 px-6 pb-6">
         <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/70 backdrop-blur-sm">
@@ -1375,6 +1515,7 @@ function ConnectedThoughtWebCanvas() {
 
 function NodeCard({
   node,
+  animationStyle,
   position,
   isConnectionSource,
   isConnectionTarget,
@@ -1393,6 +1534,7 @@ function NodeCard({
   onEditSubmit,
 }: {
   node: NodeDoc;
+  animationStyle?: CSSProperties;
   position: Point;
   isConnectionSource: boolean;
   isConnectionTarget: boolean;
@@ -1472,6 +1614,7 @@ function NodeCard({
         left: position.x,
         top: position.y,
         touchAction: isEditing ? "auto" : "none",
+        ...animationStyle,
       }}
       onPointerDown={(event) => onPointerDown(node, event)}
       onDoubleClick={() => onDoubleClick(node)}
@@ -1527,6 +1670,117 @@ function NodeCard({
           <span className="block h-2 w-2 rounded-full bg-current" />
         </button>
       ) : null}
+    </article>
+  );
+}
+
+function DateNodeCard({
+  node,
+  animationStyle,
+  isEditing,
+  editValue,
+  editError,
+  isDeleting,
+  isSavingEdit,
+  onDoubleClick,
+  onDelete,
+  onEditChange,
+  onEditKeyDown,
+  onEditSubmit,
+}: {
+  node: NodeDoc;
+  animationStyle?: CSSProperties;
+  isEditing: boolean;
+  editValue: string;
+  editError: string | null;
+  isDeleting: boolean;
+  isSavingEdit: boolean;
+  onDoubleClick: (node: NodeDoc) => void;
+  onDelete: () => void;
+  onEditChange: (value: string) => void;
+  onEditKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onEditSubmit: () => void;
+}) {
+  const editRef = useRef<HTMLTextAreaElement>(null);
+  const label = getNodeLabel(node);
+  const labelStyle = NODE_LABEL_STYLES[label];
+
+  useEffect(() => {
+    if (!isEditing || !editRef.current) {
+      return;
+    }
+
+    editRef.current.focus();
+    editRef.current.setSelectionRange(
+      editRef.current.value.length,
+      editRef.current.value.length,
+    );
+    resizeTextarea(editRef.current);
+  }, [editValue, isEditing]);
+
+  return (
+    <article
+      data-node-id={node._id}
+      className={cn(
+        "rounded-[1.45rem] border bg-[rgb(21_28_44_/_0.92)] px-4 py-3 text-white shadow-[0_16px_45px_rgba(0,0,0,0.35)] backdrop-blur-sm transition",
+        labelStyle.borderClassName,
+        isDeleting && "opacity-60",
+      )}
+      style={animationStyle}
+      onDoubleClick={() => onDoubleClick(node)}
+    >
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              "rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.22em]",
+              labelStyle.badgeClassName,
+            )}
+          >
+            {labelStyle.badgeLabel}
+          </span>
+          <span className="text-xs uppercase tracking-[0.18em] text-white/45">
+            {DATE_TIME_FORMATTER.format(node.createdAt)}
+          </span>
+        </div>
+        {!isEditing ? (
+          <button
+            type="button"
+            className="rounded-full border border-red-300/18 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={onDelete}
+            disabled={isDeleting}
+          >
+            Delete
+          </button>
+        ) : null}
+      </div>
+      {isEditing ? (
+        <div>
+          <textarea
+            ref={editRef}
+            value={editValue}
+            onChange={(event) => onEditChange(event.target.value)}
+            onKeyDown={onEditKeyDown}
+            className="min-h-16 w-full overflow-hidden bg-transparent text-[15px] leading-6 text-white/92 outline-none"
+            rows={1}
+          />
+          <div className="mt-3 flex items-center justify-between gap-3 text-xs text-white/55">
+            <span>{editError ?? "Enter saves. Shift+Enter adds a line."}</span>
+            <button
+              type="button"
+              onClick={onEditSubmit}
+              disabled={isSavingEdit}
+              className="rounded-full bg-white/10 px-3 py-1.5 font-medium text-white transition hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSavingEdit ? "Saving..." : "Save"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="text-[15px] leading-6 whitespace-pre-wrap text-white/92">
+          {node.text}
+        </div>
+      )}
     </article>
   );
 }
@@ -2070,6 +2324,65 @@ function getErrorMessage(payload: unknown) {
   }
 
   return null;
+}
+
+function getDateGroups(nodes: NodeDoc[], todayKey: string): DateGroup[] {
+  const groupsByKey = new Map<string, DateGroup>();
+
+  for (const node of nodes) {
+    const key = getLocalDateKey(node.createdAt);
+    const dayStart = getLocalDayStart(node.createdAt);
+    const existingGroup = groupsByKey.get(key);
+
+    if (existingGroup) {
+      existingGroup.nodes.push(node);
+      continue;
+    }
+
+    groupsByKey.set(key, {
+      key,
+      dayStart,
+      label: DATE_HEADING_FORMATTER.format(node.createdAt),
+      isToday: key === todayKey,
+      nodes: [node],
+    });
+  }
+
+  return [...groupsByKey.values()]
+    .sort((left, right) => right.dayStart - left.dayStart)
+    .map((group) => ({
+      ...group,
+      nodes: [...group.nodes].sort((left, right) => right.createdAt - left.createdAt),
+    }));
+}
+
+function getLocalDateKey(timestamp: number) {
+  const date = new Date(timestamp);
+
+  return [
+    date.getFullYear(),
+    `${date.getMonth() + 1}`.padStart(2, "0"),
+    `${date.getDate()}`.padStart(2, "0"),
+  ].join("-");
+}
+
+function getLocalDayStart(timestamp: number) {
+  const date = new Date(timestamp);
+
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function getStaggerStyle(index: number, stepMs: number): CSSProperties {
+  const delay = Math.min(index, 16) * stepMs;
+
+  return {
+    animationName: "canvas-stagger-in",
+    animationDuration: "480ms",
+    animationTimingFunction: "cubic-bezier(0.22, 1, 0.36, 1)",
+    animationFillMode: "both",
+    animationDelay: `${delay}ms`,
+    willChange: "transform, opacity",
+  };
 }
 
 function createExtractionNodePlacements(
