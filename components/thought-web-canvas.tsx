@@ -5,8 +5,10 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
+  type WheelEvent,
 } from "react";
 import { useMutation, useQuery } from "convex/react";
 
@@ -20,6 +22,10 @@ const COMPOSER_HEIGHT = 132;
 const COMPOSER_MARGIN = 16;
 const FALLBACK_NODE_SIZE = { width: 224, height: 96 };
 const CONTEXT_MENU_WIDTH = 168;
+const MIN_VIEWPORT_SCALE = 0.5;
+const MAX_VIEWPORT_SCALE = 2.5;
+const PAN_GESTURE_THRESHOLD = 3;
+const WHEEL_ZOOM_SENSITIVITY = 0.0015;
 
 type NodeDoc = Doc<"nodes">;
 type ConnectionDoc = Doc<"connections">;
@@ -64,6 +70,18 @@ type ContextMenuState = Point & {
   nodeId: Id<"nodes">;
 };
 
+type PanState = {
+  pointerId: number;
+  startPointer: Point;
+  startOrigin: Point;
+  moved: boolean;
+};
+
+type ViewportState = {
+  origin: Point;
+  scale: number;
+};
+
 export function ThoughtWebCanvas() {
   if (!convexUrl) {
     return <MissingConvexState />;
@@ -85,7 +103,12 @@ function ConnectedThoughtWebCanvas() {
   const skipCanvasClickRef = useRef(false);
   const dragStateRef = useRef<DragState | null>(null);
   const connectionStateRef = useRef<ConnectionState | null>(null);
+  const panStateRef = useRef<PanState | null>(null);
   const positionOverridesRef = useRef<Record<string, Point>>({});
+  const viewportRef = useRef<ViewportState>({
+    origin: { x: 0, y: 0 },
+    scale: 1,
+  });
 
   const [composer, setComposer] = useState<ComposerState | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -93,6 +116,7 @@ function ConnectedThoughtWebCanvas() {
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isDeletingNode, setIsDeletingNode] = useState<Id<"nodes"> | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const [panState, setPanState] = useState<PanState | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState | null>(
     null,
   );
@@ -102,6 +126,10 @@ function ConnectedThoughtWebCanvas() {
     Record<string, Point>
   >({});
   const [nodeSizes, setNodeSizes] = useState<Record<string, Size>>({});
+  const [viewport, setViewport] = useState<ViewportState>({
+    origin: { x: 0, y: 0 },
+    scale: 1,
+  });
 
   const nodes = canvas?.nodes ?? [];
   const connections = canvas?.connections ?? [];
@@ -115,8 +143,16 @@ function ConnectedThoughtWebCanvas() {
   }, [connectionState]);
 
   useEffect(() => {
+    panStateRef.current = panState;
+  }, [panState]);
+
+  useEffect(() => {
     positionOverridesRef.current = positionOverrides;
   }, [positionOverrides]);
+
+  useEffect(() => {
+    viewportRef.current = viewport;
+  }, [viewport]);
 
   useEffect(() => {
     if (!canvas) {
@@ -191,11 +227,16 @@ function ConnectedThoughtWebCanvas() {
     const handlePointerMove = (event: PointerEvent) => {
       const activeDrag = dragStateRef.current;
       const activeConnection = connectionStateRef.current;
+      const activePan = panStateRef.current;
 
       if (activeDrag && event.pointerId === activeDrag.pointerId) {
         const nextPosition = {
-          x: activeDrag.startPosition.x + (event.clientX - activeDrag.startPointer.x),
-          y: activeDrag.startPosition.y + (event.clientY - activeDrag.startPointer.y),
+          x:
+            activeDrag.startPosition.x +
+            (event.clientX - activeDrag.startPointer.x) / viewportRef.current.scale,
+          y:
+            activeDrag.startPosition.y +
+            (event.clientY - activeDrag.startPointer.y) / viewportRef.current.scale,
         };
         const moved =
           activeDrag.moved ||
@@ -221,8 +262,46 @@ function ConnectedThoughtWebCanvas() {
         return;
       }
 
+      if (activePan && event.pointerId === activePan.pointerId) {
+        const pointerDelta = {
+          x: event.clientX - activePan.startPointer.x,
+          y: event.clientY - activePan.startPointer.y,
+        };
+        const moved =
+          activePan.moved ||
+          Math.abs(pointerDelta.x) > PAN_GESTURE_THRESHOLD ||
+          Math.abs(pointerDelta.y) > PAN_GESTURE_THRESHOLD;
+
+        if (!moved) {
+          return;
+        }
+
+        skipCanvasClickRef.current = true;
+        setPanState((currentPan) =>
+          currentPan
+            ? {
+                ...currentPan,
+                moved: true,
+              }
+            : currentPan,
+        );
+        setViewport((currentViewport) => ({
+          ...currentViewport,
+          origin: {
+            x: activePan.startOrigin.x - pointerDelta.x / currentViewport.scale,
+            y: activePan.startOrigin.y - pointerDelta.y / currentViewport.scale,
+          },
+        }));
+        return;
+      }
+
       if (activeConnection && event.pointerId === activeConnection.pointerId) {
-        const nextPointer = getCanvasPoint(event.clientX, event.clientY, canvasRef.current);
+        const nextPointer = screenToWorld(
+          event.clientX,
+          event.clientY,
+          canvasRef.current,
+          viewportRef.current,
+        );
 
         if (!nextPointer) {
           return;
@@ -277,6 +356,17 @@ function ConnectedThoughtWebCanvas() {
           });
         });
 
+        return;
+      }
+
+      const activePan = panStateRef.current;
+
+      if (activePan && event.pointerId === activePan.pointerId) {
+        if (activePan.moved) {
+          skipCanvasClickRef.current = true;
+        }
+
+        setPanState(null);
         return;
       }
 
@@ -410,6 +500,47 @@ function ConnectedThoughtWebCanvas() {
     }
   }
 
+  function handleOutsidePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    const target = event.target as HTMLElement | null;
+
+    if (!target) {
+      return;
+    }
+
+    let handled = false;
+
+    if (composer && !target.closest("[data-composer-card]")) {
+      handled = true;
+
+      if (composer.text.trim()) {
+        void submitComposer();
+      } else {
+        setComposer(null);
+      }
+    }
+
+    if (
+      editState &&
+      !target.closest(`[data-node-id="${editState.nodeId}"]`)
+    ) {
+      handled = true;
+
+      if (editState.text.trim()) {
+        void submitEdit();
+      } else {
+        setEditState(null);
+      }
+    }
+
+    if (!handled) {
+      return;
+    }
+
+    skipCanvasClickRef.current = true;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   async function handleDeleteNode(nodeId: Id<"nodes">) {
     if (isDeletingNode === nodeId) {
       return;
@@ -439,8 +570,6 @@ function ConnectedThoughtWebCanvas() {
   }
 
   function handleCanvasClick(event: ReactPointerEvent<HTMLDivElement>) {
-    setContextMenu(null);
-
     if (skipCanvasClickRef.current) {
       skipCanvasClickRef.current = false;
       return;
@@ -450,7 +579,21 @@ function ConnectedThoughtWebCanvas() {
       return;
     }
 
-    const nextPoint = getCanvasPoint(event.clientX, event.clientY, canvasRef.current);
+    setContextMenu(null);
+    setSaveError(null);
+  }
+
+  function handleCanvasDoubleClick(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+
+    const nextPoint = screenToWorld(
+      event.clientX,
+      event.clientY,
+      canvasRef.current,
+      viewportRef.current,
+    );
 
     if (!nextPoint) {
       return;
@@ -459,17 +602,90 @@ function ConnectedThoughtWebCanvas() {
     setEditState(null);
     setSaveError(null);
     setComposer({
-      ...clampComposerPoint(nextPoint, canvasRef.current),
+      ...clampComposerPoint(nextPoint, canvasRef.current, viewportRef.current),
       text: "",
       error: null,
     });
   }
 
-  function handleCanvasContextMenu(event: ReactPointerEvent<HTMLDivElement>) {
+  function handleCanvasPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (
+      event.button !== 0 ||
+      event.target !== event.currentTarget ||
+      dragStateRef.current ||
+      connectionStateRef.current
+    ) {
+      return;
+    }
+
+    setContextMenu(null);
+    setPanState({
+      pointerId: event.pointerId,
+      startPointer: { x: event.clientX, y: event.clientY },
+      startOrigin: viewportRef.current.origin,
+      moved: false,
+    });
+  }
+
+  function handleCanvasContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
     if (event.target === event.currentTarget) {
       event.preventDefault();
       setContextMenu(null);
     }
+  }
+
+  function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+
+    const wheelDelta = getWheelDeltaInPixels(event, canvasRef.current);
+
+    if (
+      Math.abs(wheelDelta.x) > 0.5 &&
+      Math.abs(wheelDelta.x) >= Math.abs(wheelDelta.y)
+    ) {
+      setViewport((currentViewport) => ({
+        ...currentViewport,
+        origin: {
+          x: currentViewport.origin.x + wheelDelta.x / currentViewport.scale,
+          y: currentViewport.origin.y,
+        },
+      }));
+      return;
+    }
+
+    const viewportPoint = getCanvasScreenPoint(
+      event.clientX,
+      event.clientY,
+      canvasRef.current,
+    );
+    const worldPoint = screenToWorld(
+      event.clientX,
+      event.clientY,
+      canvasRef.current,
+      viewportRef.current,
+    );
+
+    if (!viewportPoint || !worldPoint) {
+      return;
+    }
+
+    const nextScale = clamp(
+      viewportRef.current.scale * Math.exp(-event.deltaY * WHEEL_ZOOM_SENSITIVITY),
+      MIN_VIEWPORT_SCALE,
+      MAX_VIEWPORT_SCALE,
+    );
+
+    if (Math.abs(nextScale - viewportRef.current.scale) < 0.001) {
+      return;
+    }
+
+    setViewport({
+      scale: nextScale,
+      origin: {
+        x: worldPoint.x - viewportPoint.x / nextScale,
+        y: worldPoint.y - viewportPoint.y / nextScale,
+      },
+    });
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -564,7 +780,12 @@ function ConnectedThoughtWebCanvas() {
       return;
     }
 
-    const nextPoint = getCanvasPoint(event.clientX, event.clientY, canvasRef.current);
+    const nextPoint = screenToWorld(
+      event.clientX,
+      event.clientY,
+      canvasRef.current,
+      viewportRef.current,
+    );
 
     if (!nextPoint) {
       return;
@@ -599,7 +820,7 @@ function ConnectedThoughtWebCanvas() {
 
   function handleNodeContextMenu(
     nodeId: Id<"nodes">,
-    event: ReactPointerEvent<HTMLElement>,
+    event: ReactMouseEvent<HTMLElement>,
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -608,11 +829,17 @@ function ConnectedThoughtWebCanvas() {
     setConnectionState(null);
     setSaveError(null);
     const nextPoint = clampContextMenuPoint(
-      getCanvasPoint(event.clientX, event.clientY, canvasRef.current) ?? {
+      screenToWorld(
+        event.clientX,
+        event.clientY,
+        canvasRef.current,
+        viewportRef.current,
+      ) ?? {
         x: 0,
         y: 0,
       },
       canvasRef.current,
+      viewportRef.current,
     );
 
     setContextMenu({
@@ -649,121 +876,142 @@ function ConnectedThoughtWebCanvas() {
         connectionState.pointer,
       )
     : null;
+  const sceneOrigin = worldToScreen({ x: 0, y: 0 }, viewport);
 
   return (
     <main
       ref={canvasRef}
-      className="canvas-grid relative h-screen overflow-hidden"
+      className={cn(
+        "canvas-grid relative h-screen overflow-hidden",
+        panState ? "cursor-grabbing" : "cursor-grab",
+      )}
+      style={{ touchAction: "none" }}
+      onPointerDownCapture={handleOutsidePointerDown}
+      onPointerDown={handleCanvasPointerDown}
       onClick={handleCanvasClick}
+      onDoubleClick={handleCanvasDoubleClick}
       onContextMenu={handleCanvasContextMenu}
+      onWheel={handleCanvasWheel}
     >
-      <svg className="pointer-events-none absolute inset-0 h-full w-full">
-        {connections.map((connection) => {
-          const points = getConnectionPoints(
-            connection,
-            nodes,
-            positionOverrides,
-            nodeSizes,
-          );
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{
+          transform: `translate(${sceneOrigin.x}px, ${sceneOrigin.y}px) scale(${viewport.scale})`,
+          transformOrigin: "0 0",
+        }}
+      >
+        <svg
+          className="pointer-events-none absolute inset-0 h-full w-full"
+          style={{ overflow: "visible" }}
+        >
+          {connections.map((connection) => {
+            const points = getConnectionPoints(
+              connection,
+              nodes,
+              positionOverrides,
+              nodeSizes,
+            );
 
-          if (!points) {
-            return null;
-          }
+            if (!points) {
+              return null;
+            }
 
-          return (
+            return (
+              <line
+                key={connection._id}
+                x1={points.start.x}
+                y1={points.start.y}
+                x2={points.end.x}
+                y2={points.end.y}
+                stroke="rgb(121 239 229 / 0.55)"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
+            );
+          })}
+          {connectionState && previewStartPoint ? (
             <line
-              key={connection._id}
-              x1={points.start.x}
-              y1={points.start.y}
-              x2={points.end.x}
-              y2={points.end.y}
-              stroke="rgb(121 239 229 / 0.55)"
+              x1={previewStartPoint.x}
+              y1={previewStartPoint.y}
+              x2={connectionState.pointer.x}
+              y2={connectionState.pointer.y}
+              stroke="rgb(255 255 255 / 0.8)"
               strokeWidth="2"
+              strokeDasharray="7 6"
               strokeLinecap="round"
             />
-          );
-        })}
-        {connectionState && previewStartPoint ? (
-          <line
-            x1={previewStartPoint.x}
-            y1={previewStartPoint.y}
-            x2={connectionState.pointer.x}
-            y2={connectionState.pointer.y}
-            stroke="rgb(255 255 255 / 0.8)"
-            strokeWidth="2"
-            strokeDasharray="7 6"
-            strokeLinecap="round"
+          ) : null}
+        </svg>
+
+        {composer ? (
+          <InlineTextCard
+            textareaRef={composerRef}
+            position={composer}
+            value={composer.text}
+            error={composer.error}
+            buttonLabel={isCreatingNode ? "Saving..." : "Save"}
+            disabled={isCreatingNode}
+            placeholder="Type a thought..."
+            onChange={handleComposerChange}
+            onKeyDown={handleComposerKeyDown}
+            onSubmit={() => void submitComposer()}
           />
         ) : null}
-      </svg>
+
+        {nodes.map((node) => (
+          <NodeCard
+            key={node._id}
+            node={node}
+            position={getNodePosition(node, positionOverrides)}
+            isConnectionSource={connectionState?.fromId === node._id}
+            isConnectionTarget={connectionState?.hoverId === node._id}
+            isEditing={editState?.nodeId === node._id}
+            editValue={editState?.nodeId === node._id ? editState.text : ""}
+            editError={editState?.nodeId === node._id ? editState.error : null}
+            isDeleting={isDeletingNode === node._id}
+            isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
+            onPointerDown={handleNodePointerDown}
+            onDoubleClick={handleNodeDoubleClick}
+            onContextMenu={handleNodeContextMenu}
+            onConnectionPointerDown={handleConnectionPointerDown}
+            onSizeChange={handleNodeSizeChange}
+            onEditChange={handleEditChange}
+            onEditKeyDown={handleEditKeyDown}
+            onEditSubmit={() => void submitEdit()}
+          />
+        ))}
+
+        {contextMenu ? (
+          <div
+            className="pointer-events-auto absolute z-40 rounded-2xl border border-white/12 bg-[rgb(11_16_26_/_0.97)] p-1.5 shadow-[0_20px_50px_rgba(0,0,0,0.4)] backdrop-blur"
+            style={{
+              left: contextMenu.x,
+              top: contextMenu.y,
+              width: CONTEXT_MENU_WIDTH,
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={isDeletingNode === contextMenu.nodeId}
+              onClick={() => void handleDeleteNode(contextMenu.nodeId)}
+            >
+              <span>Delete node</span>
+              <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
+                Del
+              </span>
+            </button>
+          </div>
+        ) : null}
+      </div>
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-6">
         <div className="rounded-full border border-white/10 bg-black/25 px-4 py-2 text-xs uppercase tracking-[0.28em] text-white/70 backdrop-blur-sm">
-          Click to make a node. Double-click to edit. Right-click to delete.
+          Double-click canvas to make a node. Double-click a node to edit. Drag
+          to pan. Scroll to zoom.
         </div>
       </div>
-
-      {composer ? (
-        <InlineTextCard
-          textareaRef={composerRef}
-          position={composer}
-          value={composer.text}
-          error={composer.error}
-          buttonLabel={isCreatingNode ? "Saving..." : "Save"}
-          disabled={isCreatingNode}
-          placeholder="Type a thought..."
-          onChange={handleComposerChange}
-          onKeyDown={handleComposerKeyDown}
-          onSubmit={() => void submitComposer()}
-        />
-      ) : null}
-
-      {nodes.map((node) => (
-        <NodeCard
-          key={node._id}
-          node={node}
-          position={getNodePosition(node, positionOverrides)}
-          isConnectionSource={connectionState?.fromId === node._id}
-          isConnectionTarget={connectionState?.hoverId === node._id}
-          isEditing={editState?.nodeId === node._id}
-          editValue={editState?.nodeId === node._id ? editState.text : ""}
-          editError={editState?.nodeId === node._id ? editState.error : null}
-          isDeleting={isDeletingNode === node._id}
-          isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
-          onPointerDown={handleNodePointerDown}
-          onDoubleClick={handleNodeDoubleClick}
-          onContextMenu={handleNodeContextMenu}
-          onConnectionPointerDown={handleConnectionPointerDown}
-          onSizeChange={handleNodeSizeChange}
-          onEditChange={handleEditChange}
-          onEditKeyDown={handleEditKeyDown}
-          onEditSubmit={() => void submitEdit()}
-        />
-      ))}
-
-      {contextMenu ? (
-        <div
-          className="absolute z-40 rounded-2xl border border-white/12 bg-[rgb(11_16_26_/_0.97)] p-1.5 shadow-[0_20px_50px_rgba(0,0,0,0.4)] backdrop-blur"
-          style={{
-            left: contextMenu.x,
-            top: contextMenu.y,
-            width: CONTEXT_MENU_WIDTH,
-          }}
-          onPointerDown={(event) => event.stopPropagation()}
-        >
-          <button
-            type="button"
-            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={isDeletingNode === contextMenu.nodeId}
-            onClick={() => void handleDeleteNode(contextMenu.nodeId)}
-          >
-            <span>Delete node</span>
-            <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
-              Del
-            </span>
-          </button>
-        </div>
-      ) : null}
 
       <div className="pointer-events-none absolute bottom-0 left-0 z-10 px-6 pb-6">
         <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/70 backdrop-blur-sm">
@@ -809,7 +1057,7 @@ function NodeCard({
   onDoubleClick: (node: NodeDoc) => void;
   onContextMenu: (
     nodeId: Id<"nodes">,
-    event: ReactPointerEvent<HTMLElement>,
+    event: ReactMouseEvent<HTMLElement>,
   ) => void;
   onConnectionPointerDown: (
     nodeId: Id<"nodes">,
@@ -862,7 +1110,7 @@ function NodeCard({
       ref={cardRef}
       data-node-id={node._id}
       className={cn(
-        "absolute z-20 max-w-72 rounded-[1.45rem] border bg-[rgb(21_28_44_/_0.92)] px-4 py-3 text-white shadow-[0_16px_45px_rgba(0,0,0,0.35)] backdrop-blur-sm",
+        "pointer-events-auto absolute z-20 max-w-72 rounded-[1.45rem] border bg-[rgb(21_28_44_/_0.92)] px-4 py-3 text-white shadow-[0_16px_45px_rgba(0,0,0,0.35)] backdrop-blur-sm",
         isEditing ? "cursor-text" : "cursor-grab active:cursor-grabbing",
         isConnectionSource
           ? "border-cyan-300/65 shadow-[0_0_0_1px_rgba(123,239,229,0.3),0_16px_45px_rgba(0,0,0,0.35)]"
@@ -945,7 +1193,8 @@ function InlineTextCard({
 }) {
   return (
     <div
-      className="absolute z-20 w-72 rounded-[1.35rem] border border-white/12 bg-[rgb(19_24_38_/_0.96)] p-3 shadow-[0_20px_60px_rgba(0,0,0,0.35)] backdrop-blur"
+      data-composer-card
+      className="pointer-events-auto absolute z-20 w-72 rounded-[1.35rem] border border-white/12 bg-[rgb(19_24_38_/_0.96)] p-3 shadow-[0_20px_60px_rgba(0,0,0,0.35)] backdrop-blur"
       style={{
         left: position.x,
         top: position.y,
@@ -999,7 +1248,7 @@ function MissingConvexState() {
   );
 }
 
-function getCanvasPoint(
+function getCanvasScreenPoint(
   clientX: number,
   clientY: number,
   canvas: HTMLDivElement | null,
@@ -1016,33 +1265,94 @@ function getCanvasPoint(
   };
 }
 
-function clampComposerPoint(point: Point, canvas: HTMLDivElement | null) {
-  if (!canvas) {
-    return point;
+function screenToWorld(
+  clientX: number,
+  clientY: number,
+  canvas: HTMLDivElement | null,
+  viewport: ViewportState,
+) {
+  const screenPoint = getCanvasScreenPoint(clientX, clientY, canvas);
+
+  if (!screenPoint) {
+    return null;
   }
 
-  const rect = canvas.getBoundingClientRect();
-
   return {
-    x: clamp(point.x, COMPOSER_MARGIN, rect.width - COMPOSER_WIDTH - COMPOSER_MARGIN),
-    y: clamp(
-      point.y,
-      COMPOSER_MARGIN,
-      rect.height - COMPOSER_HEIGHT - COMPOSER_MARGIN,
-    ),
+    x: viewport.origin.x + screenPoint.x / viewport.scale,
+    y: viewport.origin.y + screenPoint.y / viewport.scale,
   };
 }
 
-function clampContextMenuPoint(point: Point, canvas: HTMLDivElement | null) {
+function worldToScreen(point: Point, viewport: ViewportState) {
+  return {
+    x: (point.x - viewport.origin.x) * viewport.scale,
+    y: (point.y - viewport.origin.y) * viewport.scale,
+  };
+}
+
+function getVisibleWorldBounds(
+  canvas: HTMLDivElement | null,
+  viewport: ViewportState,
+) {
   if (!canvas) {
-    return point;
+    return null;
   }
 
   const rect = canvas.getBoundingClientRect();
+  const margin = COMPOSER_MARGIN / viewport.scale;
 
   return {
-    x: clamp(point.x, COMPOSER_MARGIN, rect.width - CONTEXT_MENU_WIDTH - COMPOSER_MARGIN),
-    y: clamp(point.y, COMPOSER_MARGIN, rect.height - 72),
+    left: viewport.origin.x + margin,
+    top: viewport.origin.y + margin,
+    right: viewport.origin.x + rect.width / viewport.scale - margin,
+    bottom: viewport.origin.y + rect.height / viewport.scale - margin,
+  };
+}
+
+function getWheelDeltaInPixels(
+  event: WheelEvent<HTMLDivElement>,
+  canvas: HTMLDivElement | null,
+) {
+  const pageSize = canvas?.clientHeight ?? 1;
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? pageSize : 1;
+
+  return {
+    x: event.deltaX * unit,
+    y: event.deltaY * unit,
+  };
+}
+
+function clampComposerPoint(
+  point: Point,
+  canvas: HTMLDivElement | null,
+  viewport: ViewportState,
+) {
+  const bounds = getVisibleWorldBounds(canvas, viewport);
+
+  if (!bounds) {
+    return point;
+  }
+
+  return {
+    x: clamp(point.x, bounds.left, bounds.right - COMPOSER_WIDTH),
+    y: clamp(point.y, bounds.top, bounds.bottom - COMPOSER_HEIGHT),
+  };
+}
+
+function clampContextMenuPoint(
+  point: Point,
+  canvas: HTMLDivElement | null,
+  viewport: ViewportState,
+) {
+  const bounds = getVisibleWorldBounds(canvas, viewport);
+
+  if (!bounds) {
+    return point;
+  }
+
+  return {
+    x: clamp(point.x, bounds.left, bounds.right - CONTEXT_MENU_WIDTH),
+    y: clamp(point.y, bounds.top, bounds.bottom - 72),
   };
 }
 
