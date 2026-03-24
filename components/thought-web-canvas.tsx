@@ -233,9 +233,12 @@ function ConnectedThoughtWebCanvas() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [isExtractorOpen, setIsExtractorOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("general");
+  const [selectedNodeId, setSelectedNodeId] = useState<Id<"nodes"> | null>(null);
 
   const nodes = canvas?.nodes ?? [];
   const connections = canvas?.connections ?? [];
+  const selectedNode =
+    selectedNodeId ? nodes.find((node) => node._id === selectedNodeId) ?? null : null;
 
   useEffect(() => {
     dragStateRef.current = dragState;
@@ -327,7 +330,11 @@ function ConnectedThoughtWebCanvas() {
     ) {
       setContextMenu(null);
     }
-  }, [canvas, contextMenu, editState]);
+
+    if (selectedNodeId && !canvas.nodes.some((node) => node._id === selectedNodeId)) {
+      setSelectedNodeId(null);
+    }
+  }, [canvas, contextMenu, editState, selectedNodeId]);
 
   useEffect(() => {
     if (!isClearingCanvas || nodes.length > 0 || connections.length > 0) {
@@ -780,6 +787,9 @@ function ConnectedThoughtWebCanvas() {
     setIsDeletingNode(nodeId);
     setSaveError(null);
     setContextMenu(null);
+    setSelectedNodeId((currentNodeId) =>
+      currentNodeId === nodeId ? null : currentNodeId,
+    );
     setEditState((currentEdit) =>
       currentEdit?.nodeId === nodeId ? null : currentEdit,
     );
@@ -810,6 +820,7 @@ function ConnectedThoughtWebCanvas() {
     setContextMenu(null);
     setComposer(null);
     setEditState(null);
+    setSelectedNodeId(null);
     setConnectionState(null);
     setSaveError(null);
 
@@ -838,6 +849,7 @@ function ConnectedThoughtWebCanvas() {
     }
 
     setContextMenu(null);
+    setSelectedNodeId(null);
     setSaveError(null);
   }
 
@@ -858,6 +870,7 @@ function ConnectedThoughtWebCanvas() {
     }
 
     setEditState(null);
+    setSelectedNodeId(null);
     setSaveError(null);
     setComposer({
       ...clampComposerPoint(nextPoint, canvasRef.current, viewportRef.current),
@@ -1106,6 +1119,7 @@ function ConnectedThoughtWebCanvas() {
     setComposer(null);
     setContextMenu(null);
     setConnectionState(null);
+    setSelectedNodeId(node._id);
     setSaveError(null);
     setEditState({
       nodeId: node._id,
@@ -1153,6 +1167,12 @@ function ConnectedThoughtWebCanvas() {
 
   function handleCloseExtractor() {
     setIsExtractorOpen(false);
+  }
+
+  function handleNodeSelect(nodeId: Id<"nodes">) {
+    setContextMenu(null);
+    setSaveError(null);
+    setSelectedNodeId(nodeId);
   }
 
   function handleNodeSizeChange(nodeId: Id<"nodes">, nextSize: Size) {
@@ -1285,7 +1305,9 @@ function ConnectedThoughtWebCanvas() {
               editError={editState?.nodeId === node._id ? editState.error : null}
               isDeleting={isDeletingNode === node._id}
               isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
+              isSelected={selectedNodeId === node._id}
               onPointerDown={handleNodePointerDown}
+              onSelect={handleNodeSelect}
               onDoubleClick={handleNodeDoubleClick}
               onContextMenu={handleNodeContextMenu}
               onConnectionPointerDown={handleConnectionPointerDown}
@@ -1376,6 +1398,8 @@ function ConnectedThoughtWebCanvas() {
                         editError={editState?.nodeId === node._id ? editState.error : null}
                         isDeleting={isDeletingNode === node._id}
                         isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
+                        isSelected={selectedNodeId === node._id}
+                        onSelect={handleNodeSelect}
                         onDoubleClick={handleNodeDoubleClick}
                         onDelete={() => void handleDeleteNode(node._id)}
                         onEditChange={handleEditChange}
@@ -1466,6 +1490,20 @@ function ConnectedThoughtWebCanvas() {
         </ExtractorShell>
       ) : null}
 
+      <aside
+        aria-hidden={!selectedNode}
+        className={cn(
+          "pointer-events-none absolute top-24 right-6 bottom-6 z-30 w-[min(24rem,calc(100vw-3rem))] transition duration-300 ease-out",
+          selectedNode ? "translate-x-0 opacity-100" : "translate-x-full opacity-0",
+        )}
+      >
+        <div className="pointer-events-auto flex h-full flex-col rounded-[1.8rem] border border-white/10 bg-[rgb(11_16_26_/_0.9)] p-6 shadow-[0_24px_80px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+          <h2 className="text-2xl font-semibold leading-tight whitespace-pre-wrap text-white">
+            {selectedNode?.text ?? ""}
+          </h2>
+        </div>
+      </aside>
+
       <div className="pointer-events-none absolute bottom-0 left-0 z-10 px-6 pb-6">
         <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/70 backdrop-blur-sm">
           {saveError ??
@@ -1524,7 +1562,9 @@ function NodeCard({
   editError,
   isDeleting,
   isSavingEdit,
+  isSelected,
   onPointerDown,
+  onSelect,
   onDoubleClick,
   onContextMenu,
   onConnectionPointerDown,
@@ -1543,7 +1583,9 @@ function NodeCard({
   editError: string | null;
   isDeleting: boolean;
   isSavingEdit: boolean;
+  isSelected: boolean;
   onPointerDown: (node: NodeDoc, event: ReactPointerEvent<HTMLElement>) => void;
+  onSelect: (nodeId: Id<"nodes">) => void;
   onDoubleClick: (node: NodeDoc) => void;
   onContextMenu: (
     nodeId: Id<"nodes">,
@@ -1607,6 +1649,7 @@ function NodeCard({
         isConnectionSource
           ? "border-cyan-300/65 shadow-[0_0_0_1px_rgba(123,239,229,0.3),0_16px_45px_rgba(0,0,0,0.35)]"
           : labelStyle.borderClassName,
+        isSelected && !isConnectionSource && "ring-2 ring-white/30 ring-offset-0",
         isConnectionTarget && "ring-2 ring-cyan-300/65 ring-offset-0",
         isDeleting && "opacity-60",
       )}
@@ -1617,6 +1660,7 @@ function NodeCard({
         ...animationStyle,
       }}
       onPointerDown={(event) => onPointerDown(node, event)}
+      onClick={() => onSelect(node._id)}
       onDoubleClick={() => onDoubleClick(node)}
       onContextMenu={(event) => onContextMenu(node._id, event)}
     >
@@ -1665,6 +1709,7 @@ function NodeCard({
             labelStyle.connectorClassName,
           )}
           onPointerDown={(event) => onConnectionPointerDown(node._id, event)}
+          onClick={(event) => event.stopPropagation()}
           aria-label={`Start a connection from ${node.text}`}
         >
           <span className="block h-2 w-2 rounded-full bg-current" />
@@ -1682,6 +1727,8 @@ function DateNodeCard({
   editError,
   isDeleting,
   isSavingEdit,
+  isSelected,
+  onSelect,
   onDoubleClick,
   onDelete,
   onEditChange,
@@ -1695,6 +1742,8 @@ function DateNodeCard({
   editError: string | null;
   isDeleting: boolean;
   isSavingEdit: boolean;
+  isSelected: boolean;
+  onSelect: (nodeId: Id<"nodes">) => void;
   onDoubleClick: (node: NodeDoc) => void;
   onDelete: () => void;
   onEditChange: (value: string) => void;
@@ -1724,9 +1773,11 @@ function DateNodeCard({
       className={cn(
         "rounded-[1.45rem] border bg-[rgb(21_28_44_/_0.92)] px-4 py-3 text-white shadow-[0_16px_45px_rgba(0,0,0,0.35)] backdrop-blur-sm transition",
         labelStyle.borderClassName,
+        isSelected && "ring-2 ring-white/30 ring-offset-0",
         isDeleting && "opacity-60",
       )}
       style={animationStyle}
+      onClick={() => onSelect(node._id)}
       onDoubleClick={() => onDoubleClick(node)}
     >
       <div className="mb-3 flex items-start justify-between gap-3">
