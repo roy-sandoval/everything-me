@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type RefObject,
   type WheelEvent,
 } from "react";
@@ -14,6 +15,16 @@ import { useMutation, useQuery } from "convex/react";
 
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   extractionResponseSchema,
   type ExtractedConnection,
@@ -28,6 +39,7 @@ const COMPOSER_HEIGHT = 132;
 const COMPOSER_MARGIN = 16;
 const FALLBACK_NODE_SIZE = { width: 224, height: 96 };
 const CONTEXT_MENU_WIDTH = 168;
+const EXTRACTOR_SHELL_HEIGHT = 496;
 const MIN_VIEWPORT_SCALE = 0.5;
 const MAX_VIEWPORT_SCALE = 2.5;
 const PAN_GESTURE_THRESHOLD = 3;
@@ -120,9 +132,14 @@ type EditState = {
   error: string | null;
 };
 
-type ContextMenuState = Point & {
-  nodeId: Id<"nodes">;
-};
+type ContextMenuState =
+  | (Point & {
+      kind: "node";
+      nodeId: Id<"nodes">;
+    })
+  | (Point & {
+      kind: "canvas";
+    });
 
 type PanState = {
   pointerId: number;
@@ -150,6 +167,7 @@ function ConnectedThoughtWebCanvas() {
   const moveNode = useMutation(api.graph.moveNode);
   const updateNode = useMutation(api.graph.updateNode);
   const deleteNode = useMutation(api.graph.deleteNode);
+  const clearCanvas = useMutation(api.graph.clearCanvas);
   const createConnection = useMutation(api.graph.createConnection);
   const importExtraction = useMutation(api.graph.importExtraction);
 
@@ -177,6 +195,8 @@ function ConnectedThoughtWebCanvas() {
   );
   const [editState, setEditState] = useState<EditState | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
+  const [isClearingCanvas, setIsClearingCanvas] = useState(false);
   const [positionOverrides, setPositionOverrides] = useState<
     Record<string, Point>
   >({});
@@ -189,6 +209,7 @@ function ConnectedThoughtWebCanvas() {
   const [extractError, setExtractError] = useState<string | null>(null);
   const [extractFeedback, setExtractFeedback] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isExtractorOpen, setIsExtractorOpen] = useState(false);
 
   const nodes = canvas?.nodes ?? [];
   const connections = canvas?.connections ?? [];
@@ -266,12 +287,20 @@ function ConnectedThoughtWebCanvas() {
     }
 
     if (
-      contextMenu &&
+      contextMenu?.kind === "node" &&
       !canvas.nodes.some((node) => node._id === contextMenu.nodeId)
     ) {
       setContextMenu(null);
     }
   }, [canvas, contextMenu, editState]);
+
+  useEffect(() => {
+    if (!isClearingCanvas || nodes.length > 0 || connections.length > 0) {
+      return;
+    }
+
+    setIsClearingCanvas(false);
+  }, [connections.length, isClearingCanvas, nodes.length]);
 
   useEffect(() => {
     if (!composerRef.current) {
@@ -691,6 +720,33 @@ function ConnectedThoughtWebCanvas() {
     }
   }
 
+  async function handleClearCanvas() {
+    if (isClearingCanvas) {
+      return;
+    }
+
+    setIsClearingCanvas(true);
+    setIsClearDialogOpen(false);
+    setContextMenu(null);
+    setComposer(null);
+    setEditState(null);
+    setConnectionState(null);
+    setSaveError(null);
+
+    try {
+      const result = await clearCanvas({});
+
+      if (result.completed) {
+        setIsClearingCanvas(false);
+      }
+    } catch (error) {
+      setIsClearingCanvas(false);
+      setSaveError(
+        error instanceof Error ? error.message : "Could not clear the canvas.",
+      );
+    }
+  }
+
   function handleCanvasClick(event: ReactPointerEvent<HTMLDivElement>) {
     if (skipCanvasClickRef.current) {
       skipCanvasClickRef.current = false;
@@ -752,7 +808,27 @@ function ConnectedThoughtWebCanvas() {
   function handleCanvasContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
     if (event.target === event.currentTarget) {
       event.preventDefault();
-      setContextMenu(null);
+      setComposer(null);
+      setConnectionState(null);
+      setSaveError(null);
+      const nextPoint = clampContextMenuPoint(
+        screenToWorld(
+          event.clientX,
+          event.clientY,
+          canvasRef.current,
+          viewportRef.current,
+        ) ?? {
+          x: 0,
+          y: 0,
+        },
+        canvasRef.current,
+        viewportRef.current,
+      );
+
+      setContextMenu({
+        kind: "canvas",
+        ...nextPoint,
+      });
     }
   }
 
@@ -965,9 +1041,20 @@ function ConnectedThoughtWebCanvas() {
     );
 
     setContextMenu({
+      kind: "node",
       nodeId,
       ...nextPoint,
     });
+  }
+
+  function handleOpenExtractor() {
+    setIsExtractorOpen(true);
+    setContextMenu(null);
+    setSaveError(null);
+  }
+
+  function handleCloseExtractor() {
+    setIsExtractorOpen(false);
   }
 
   function handleNodeSizeChange(nodeId: Id<"nodes">, nextSize: Size) {
@@ -1113,17 +1200,34 @@ function ConnectedThoughtWebCanvas() {
             }}
             onPointerDown={(event) => event.stopPropagation()}
           >
-            <button
-              type="button"
-              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={isDeletingNode === contextMenu.nodeId}
-              onClick={() => void handleDeleteNode(contextMenu.nodeId)}
-            >
-              <span>Delete node</span>
-              <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
-                Del
-              </span>
-            </button>
+            {contextMenu.kind === "node" ? (
+              <button
+                type="button"
+                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isDeletingNode === contextMenu.nodeId}
+                onClick={() => void handleDeleteNode(contextMenu.nodeId)}
+              >
+                <span>Delete node</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
+                  Del
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-red-100 transition hover:bg-red-500/12 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isClearingCanvas}
+                onClick={() => {
+                  setContextMenu(null);
+                  setIsClearDialogOpen(true);
+                }}
+              >
+                <span>Clear all nodes</span>
+                <span className="text-xs uppercase tracking-[0.2em] text-red-200/70">
+                  Del
+                </span>
+              </button>
+            )}
           </div>
         ) : null}
       </div>
@@ -1135,32 +1239,72 @@ function ConnectedThoughtWebCanvas() {
         </div>
       </div>
 
-      <ExtractorPanel
-        value={extractInput}
-        error={extractError}
-        feedback={extractFeedback}
-        disabled={isExtracting}
-        onChange={(value) => {
-          setExtractInput(value);
-          setExtractError(null);
-          setExtractFeedback(null);
-        }}
-        onClear={() => {
-          setExtractInput("");
-          setExtractError(null);
-          setExtractFeedback(null);
-        }}
-        onSubmit={() => void handleExtract()}
-      />
+      <ExtractorShell>
+        <ExtractorPanel
+          isOpen={isExtractorOpen}
+          value={extractInput}
+          error={extractError}
+          feedback={extractFeedback}
+          disabled={isExtracting}
+          onOpen={handleOpenExtractor}
+          onClose={handleCloseExtractor}
+          onChange={(value) => {
+            setExtractInput(value);
+            setExtractError(null);
+            setExtractFeedback(null);
+          }}
+          onClear={() => {
+            setExtractInput("");
+            setExtractError(null);
+            setExtractFeedback(null);
+          }}
+          onSubmit={() => void handleExtract()}
+        />
+      </ExtractorShell>
 
       <div className="pointer-events-none absolute bottom-0 left-0 z-10 px-6 pb-6">
         <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/70 backdrop-blur-sm">
           {saveError ??
+            (isClearingCanvas
+              ? "Clearing canvas..."
+              : null) ??
             (canvas
               ? `${nodes.length} nodes, ${connections.length} connections`
               : "Loading your canvas...")}
         </div>
       </div>
+
+      <AlertDialog open={isClearDialogOpen} onOpenChange={setIsClearDialogOpen}>
+        <AlertDialogContent className="border-white/12 bg-[rgb(11_16_26_/_0.98)] text-white shadow-[0_24px_70px_rgba(0,0,0,0.45)]">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-white">
+              Clear the entire canvas?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-white/68">
+              This removes every node and connection from the current canvas.
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={isClearingCanvas}
+              className="border-white/12 bg-white/[0.03] text-white hover:bg-white/[0.08]"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isClearingCanvas}
+              className="bg-red-500 text-white hover:opacity-100 hover:bg-red-400"
+              onClick={(event) => {
+                event.preventDefault();
+                void handleClearCanvas();
+              }}
+            >
+              {isClearingCanvas ? "Clearing..." : "Clear all"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }
@@ -1380,72 +1524,130 @@ function InlineTextCard({
   );
 }
 
+function ExtractorShell({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  return (
+    <div className="pointer-events-none absolute top-6 right-6 z-20">
+      <div
+        className="relative w-[min(28rem,calc(100vw-3rem))]"
+        style={{ height: EXTRACTOR_SHELL_HEIGHT }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function ExtractorPanel({
+  isOpen,
   value,
   error,
   feedback,
   disabled,
+  onOpen,
+  onClose,
   onChange,
   onClear,
   onSubmit,
 }: {
+  isOpen: boolean;
   value: string;
   error: string | null;
   feedback: string | null;
   disabled: boolean;
+  onOpen: () => void;
+  onClose: () => void;
   onChange: (value: string) => void;
   onClear: () => void;
   onSubmit: () => void;
 }) {
   return (
-    <div className="absolute top-6 right-6 z-20 w-[min(28rem,calc(100vw-3rem))]">
+    <>
       <div
-        className="pointer-events-auto rounded-[1.7rem] border border-white/12 bg-[rgb(10_14_24_/_0.92)] p-4 shadow-[0_24px_70px_rgba(0,0,0,0.38)] backdrop-blur-md"
+        className={cn(
+          "absolute top-0 right-0 flex h-14 w-14 origin-top-right items-center justify-center rounded-full border border-cyan-200/25 bg-[rgb(10_14_24_/_0.96)] text-cyan-100 shadow-[0_20px_55px_rgba(0,0,0,0.4)] backdrop-blur-md transition duration-300",
+          isOpen
+            ? "pointer-events-none scale-75 opacity-0"
+            : "pointer-events-auto scale-100 opacity-100",
+        )}
+      >
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex h-full w-full items-center justify-center rounded-full text-[10px] font-semibold uppercase tracking-[0.28em] text-cyan-100 transition hover:bg-cyan-300/10"
+          aria-label="Open conversation extractor"
+        >
+          Extract
+        </button>
+      </div>
+
+      <div
+        className={cn(
+          "absolute top-0 right-0 h-full w-full origin-top-right transition duration-300",
+          isOpen
+            ? "pointer-events-auto scale-100 opacity-100"
+            : "pointer-events-none scale-[0.125] opacity-0",
+        )}
         onPointerDown={(event) => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-[11px] font-medium uppercase tracking-[0.28em] text-cyan-100/70">
-              Conversation Extractor
-            </p>
-            <h2 className="mt-2 text-lg leading-tight font-semibold text-white">
-              Paste anything. Pull out the shape.
-            </h2>
+        <div className="flex h-full flex-col rounded-[1.7rem] border border-white/12 bg-[rgb(10_14_24_/_0.92)] p-4 shadow-[0_24px_70px_rgba(0,0,0,0.38)] backdrop-blur-md">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-[0.28em] text-cyan-100/70">
+                Conversation Extractor
+              </p>
+              <h2 className="mt-2 text-lg leading-tight font-semibold text-white">
+                Paste anything. Pull out the shape.
+              </h2>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onClear}
+                disabled={disabled || value.length === 0}
+                className="rounded-full border border-white/10 px-3 py-1.5 text-xs font-medium text-white/70 transition hover:border-white/18 hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 text-sm font-medium text-white/72 transition hover:border-white/20 hover:text-white"
+                aria-label="Close conversation extractor"
+              >
+                X
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={onClear}
-            disabled={disabled || value.length === 0}
-            className="rounded-full border border-white/10 px-3 py-1.5 text-xs font-medium text-white/70 transition hover:border-white/18 hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            Clear
-          </button>
-        </div>
 
-        <textarea
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder="Paste a Claude conversation, voice note transcript, journal entry, or any other text."
-          className="mt-4 min-h-48 w-full rounded-[1.35rem] border border-white/10 bg-white/[0.04] px-4 py-3 text-sm leading-6 text-white outline-none transition placeholder:text-white/35 focus:border-cyan-200/35"
-        />
+          <textarea
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder="Paste a Claude conversation, voice note transcript, journal entry, or any other text."
+            className="mt-4 min-h-0 flex-1 rounded-[1.35rem] border border-white/10 bg-white/[0.04] px-4 py-3 text-sm leading-6 text-white outline-none transition placeholder:text-white/35 focus:border-cyan-200/35"
+          />
 
-        <div className="mt-4 flex items-center justify-between gap-4">
-          <p className="text-sm leading-6 text-white/62">
-            {error ??
-              feedback ??
-              "Aim for a few paragraphs or a full conversation. The import appends a source-organized cluster to your current canvas."}
-          </p>
-          <button
-            type="button"
-            onClick={onSubmit}
-            disabled={disabled}
-            className="shrink-0 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:scale-[1.01] hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {disabled ? "Extracting..." : "Extract"}
-          </button>
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <p className="text-sm leading-6 text-white/62">
+              {error ??
+                feedback ??
+                "Aim for a few paragraphs or a full conversation. The import appends a source-organized cluster to your current canvas."}
+            </p>
+            <button
+              type="button"
+              onClick={onSubmit}
+              disabled={disabled}
+              className="shrink-0 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:scale-[1.01] hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {disabled ? "Extracting..." : "Extract"}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 

@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 
+import { api } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 
@@ -8,6 +9,7 @@ const MAX_CONNECTIONS = 1_500;
 const MAX_CONNECTIONS_PER_NODE = 500;
 const MAX_IMPORT_NODES = 30;
 const MAX_IMPORT_CONNECTIONS = 90;
+const CLEAR_BATCH_SIZE = 128;
 const nodeLabelValidator = v.union(
   v.literal("source"),
   v.literal("note"),
@@ -308,5 +310,49 @@ export const deleteNode = mutation({
     await ctx.db.delete(args.nodeId);
 
     return null;
+  },
+});
+
+export const clearCanvas = mutation({
+  args: {},
+  returns: v.object({
+    completed: v.boolean(),
+  }),
+  handler: async (ctx) => {
+    const connections = await ctx.db.query("connections").take(CLEAR_BATCH_SIZE);
+
+    if (connections.length > 0) {
+      for (const connection of connections) {
+        await ctx.db.delete(connection._id);
+      }
+
+      if (connections.length === CLEAR_BATCH_SIZE) {
+        await ctx.scheduler.runAfter(0, api.graph.clearCanvas, {});
+      }
+
+      return {
+        completed: false,
+      };
+    }
+
+    const nodes = await ctx.db.query("nodes").take(CLEAR_BATCH_SIZE);
+
+    if (nodes.length > 0) {
+      for (const node of nodes) {
+        await ctx.db.delete(node._id);
+      }
+
+      if (nodes.length === CLEAR_BATCH_SIZE) {
+        await ctx.scheduler.runAfter(0, api.graph.clearCanvas, {});
+      }
+
+      return {
+        completed: false,
+      };
+    }
+
+    return {
+      completed: true,
+    };
   },
 });
