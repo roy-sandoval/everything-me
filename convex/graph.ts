@@ -164,7 +164,7 @@ export const importExtraction = mutation({
         clientId: v.string(),
         text: v.string(),
         label: nodeLabelValidator,
-        parentSourceClientId: v.optional(v.string()),
+        parentSourceClientId: v.union(v.string(), v.null()),
         x: v.number(),
         y: v.number(),
       }),

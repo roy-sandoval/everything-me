@@ -23,6 +23,7 @@ Rules:
   - label: one of source, note, experience, learning, realization
 - Source nodes may also include:
   - parentSourceClientId: another source node's clientId when this source is a narrower child of a broader source
+- Use parentSourceClientId: null when a node has no parent source.
 - Prefer short phrases over full sentences.
 - Remove duplicates and near-duplicates.
 - Preserve titles or references for source nodes.
@@ -31,6 +32,7 @@ Rules:
 - Connections should reference node ids using fromClientId and toClientId.
 - Do not connect a node to itself.
 - Do not assign parentSourceClientId to non-source nodes.
+- Always include parentSourceClientId on every node, using null when it does not apply.
 - Do not include explanations outside the structured output.
 
 Label guide:

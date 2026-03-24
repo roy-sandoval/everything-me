@@ -692,7 +692,12 @@ function ConnectedThoughtWebCanvas() {
     event.stopPropagation();
   }
 
-  async function handleDeleteNode(nodeId: Id<"nodes">) {
+  async function handleDeleteNode(nodeId?: Id<"nodes">) {
+    if (!nodeId) {
+      setSaveError("Could not determine which node to delete.");
+      return;
+    }
+
     if (isDeletingNode === nodeId) {
       return;
     }

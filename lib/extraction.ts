@@ -17,7 +17,7 @@ export const extractedNodeSchema = z.object({
   clientId: z.string().min(1),
   text: z.string().trim().min(1).max(160),
   label: z.enum(NODE_LABELS),
-  parentSourceClientId: z.string().trim().min(1).optional(),
+  parentSourceClientId: z.string().trim().min(1).nullable(),
 });
 
 export const extractedConnectionSchema = z.object({
@@ -68,7 +68,7 @@ export function normalizeExtractionResponse(
       text: trimmedText,
       label: node.label,
       parentSourceClientId:
-        node.label === "source" ? node.parentSourceClientId?.trim() : undefined,
+        node.label === "source" ? node.parentSourceClientId?.trim() ?? null : null,
     });
     textToClientId.set(canonicalText, clientId);
     originalIdToCanonicalId.set(node.clientId, clientId);
@@ -80,7 +80,7 @@ export function normalizeExtractionResponse(
 
   for (const node of dedupedNodes) {
     if (node.label !== "source") {
-      delete node.parentSourceClientId;
+      node.parentSourceClientId = null;
       continue;
     }
 
@@ -97,7 +97,7 @@ export function normalizeExtractionResponse(
       !parentNode ||
       parentNode.label !== "source"
     ) {
-      delete node.parentSourceClientId;
+      node.parentSourceClientId = null;
       continue;
     }
 
