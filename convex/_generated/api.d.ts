@@ -8,8 +8,7 @@
  * @module
  */
 
-import type * as entries from "../entries.js";
-import type * as linkPreviews from "../linkPreviews.js";
+import type * as graph from "../graph.js";
 
 import type {
   ApiFromModules,
@@ -18,8 +17,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  entries: typeof entries;
-  linkPreviews: typeof linkPreviews;
+  graph: typeof graph;
 }>;
 
 /**

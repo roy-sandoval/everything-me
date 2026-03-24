@@ -1,5 +1,5 @@
-import { EntryCapture } from "@/components/entry-capture";
+import { ThoughtWebCanvas } from "@/components/thought-web-canvas";
 
 export default function Home() {
-  return <EntryCapture />;
+  return <ThoughtWebCanvas />;
 }

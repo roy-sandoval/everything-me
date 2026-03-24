@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Everything Me",
-  description: "Type or paste anything.",
+  description: "Put in text. Connections form. See the web of your thinking.",
 };
 
 export default function RootLayout({

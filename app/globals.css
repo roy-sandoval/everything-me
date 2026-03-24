@@ -1,25 +1,25 @@
 @import "tailwindcss";
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --radius: 0.75rem;
+  --background: #1e293b;
+  --foreground: oklch(0.95 0.01 255);
+  --card: oklch(0.24 0.02 250);
+  --card-foreground: oklch(0.96 0.01 255);
+  --popover: oklch(0.23 0.02 250);
+  --popover-foreground: oklch(0.96 0.01 255);
+  --primary: oklch(0.79 0.11 190);
+  --primary-foreground: oklch(0.2 0.02 250);
+  --secondary: oklch(0.28 0.02 250);
+  --secondary-foreground: oklch(0.92 0.01 255);
+  --muted: oklch(0.28 0.018 250);
+  --muted-foreground: oklch(0.75 0.015 255);
+  --accent: oklch(0.31 0.02 245);
+  --accent-foreground: oklch(0.96 0.01 255);
+  --destructive: oklch(0.67 0.21 22);
+  --border: oklch(0.37 0.02 245 / 0.65);
+  --input: oklch(0.24 0.02 250);
+  --ring: oklch(0.79 0.11 190 / 0.6);
+  --radius: 1rem;
 }
 
 @theme inline {
@@ -45,16 +45,37 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-sans: "Avenir Next", "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+}
+
+html {
+  height: 100%;
 }
 
 * {
   @apply border-border;
+  box-sizing: border-box;
 }
 
 body {
+  min-height: 100%;
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+  overscroll-behavior: none;
+}
+
+textarea {
+  resize: none;
+}
+
+.canvas-grid {
+  background-color: var(--background);
+  background-image:
+    linear-gradient(to right, rgb(255 255 255 / 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.045) 1px, transparent 1px),
+    radial-gradient(circle at top, rgb(96 242 230 / 0.14), transparent 45%);
+  background-position: center;
+  background-size: 32px 32px, 32px 32px, 100% 100%;
 }
