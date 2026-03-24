@@ -112,10 +112,11 @@ type ComposerState = Point & {
 };
 
 type DragState = {
-  nodeId: Id<"nodes">;
+  rootNodeId: Id<"nodes">;
+  draggedNodeIds: Id<"nodes">[];
   pointerId: number;
   startPointer: Point;
-  startPosition: Point;
+  startPositions: Record<string, Point>;
   moved: boolean;
 };
 
@@ -312,24 +313,52 @@ function ConnectedThoughtWebCanvas() {
   }, [composer]);
 
   useEffect(() => {
+    const clearPositionOverrides = (nodeIds: Id<"nodes">[]) => {
+      setPositionOverrides((currentOverrides) => {
+        let changed = false;
+        const nextOverrides = { ...currentOverrides };
+
+        for (const nodeId of nodeIds) {
+          if (!(nodeId in nextOverrides)) {
+            continue;
+          }
+
+          delete nextOverrides[nodeId];
+          changed = true;
+        }
+
+        return changed ? nextOverrides : currentOverrides;
+      });
+    };
+
     const handlePointerMove = (event: PointerEvent) => {
       const activeDrag = dragStateRef.current;
       const activeConnection = connectionStateRef.current;
       const activePan = panStateRef.current;
 
       if (activeDrag && event.pointerId === activeDrag.pointerId) {
+        const rootStartPosition = activeDrag.startPositions[activeDrag.rootNodeId];
+
+        if (!rootStartPosition) {
+          return;
+        }
+
         const nextPosition = {
           x:
-            activeDrag.startPosition.x +
+            rootStartPosition.x +
             (event.clientX - activeDrag.startPointer.x) / viewportRef.current.scale,
           y:
-            activeDrag.startPosition.y +
+            rootStartPosition.y +
             (event.clientY - activeDrag.startPointer.y) / viewportRef.current.scale,
+        };
+        const delta = {
+          x: nextPosition.x - rootStartPosition.x,
+          y: nextPosition.y - rootStartPosition.y,
         };
         const moved =
           activeDrag.moved ||
-          Math.abs(nextPosition.x - activeDrag.startPosition.x) > 2 ||
-          Math.abs(nextPosition.y - activeDrag.startPosition.y) > 2;
+          Math.abs(delta.x) > 2 ||
+          Math.abs(delta.y) > 2;
 
         if (moved) {
           skipCanvasClickRef.current = true;
@@ -343,10 +372,24 @@ function ConnectedThoughtWebCanvas() {
               }
             : currentDrag,
         );
-        setPositionOverrides((currentOverrides) => ({
-          ...currentOverrides,
-          [activeDrag.nodeId]: nextPosition,
-        }));
+        setPositionOverrides((currentOverrides) => {
+          const nextOverrides = { ...currentOverrides };
+
+          for (const nodeId of activeDrag.draggedNodeIds) {
+            const startPosition = activeDrag.startPositions[nodeId];
+
+            if (!startPosition) {
+              continue;
+            }
+
+            nextOverrides[nodeId] = {
+              x: startPosition.x + delta.x,
+              y: startPosition.y + delta.y,
+            };
+          }
+
+          return nextOverrides;
+        });
         return;
       }
 
@@ -416,32 +459,30 @@ function ConnectedThoughtWebCanvas() {
 
       if (activeDrag && event.pointerId === activeDrag.pointerId) {
         const finalPosition =
-          positionOverridesRef.current[activeDrag.nodeId] ?? activeDrag.startPosition;
+          positionOverridesRef.current[activeDrag.rootNodeId] ??
+          activeDrag.startPositions[activeDrag.rootNodeId];
 
         setDragState(null);
 
+        if (!finalPosition) {
+          clearPositionOverrides(activeDrag.draggedNodeIds);
+          return;
+        }
+
         if (!activeDrag.moved) {
-          setPositionOverrides((currentOverrides) => {
-            const nextOverrides = { ...currentOverrides };
-            delete nextOverrides[activeDrag.nodeId];
-            return nextOverrides;
-          });
+          clearPositionOverrides(activeDrag.draggedNodeIds);
           return;
         }
 
         void moveNode({
-          nodeId: activeDrag.nodeId,
+          nodeId: activeDrag.rootNodeId,
           x: finalPosition.x,
           y: finalPosition.y,
         }).catch((error: unknown) => {
           setSaveError(
             error instanceof Error ? error.message : "Could not move that node.",
           );
-          setPositionOverrides((currentOverrides) => {
-            const nextOverrides = { ...currentOverrides };
-            delete nextOverrides[activeDrag.nodeId];
-            return nextOverrides;
-          });
+          clearPositionOverrides(activeDrag.draggedNodeIds);
         });
 
         return;
@@ -960,18 +1001,36 @@ function ConnectedThoughtWebCanvas() {
     setContextMenu(null);
     setSaveError(null);
 
-    const currentPosition = getNodePosition(node, positionOverrides);
+    const draggedNodeIds =
+      node.label === "source"
+        ? getMoveGroupNodeIds(nodes, connections, node._id)
+        : [node._id];
+    const startPositions = Object.fromEntries(
+      draggedNodeIds.map((nodeId) => {
+        const draggedNode = nodes.find((currentNode) => currentNode._id === nodeId);
+
+        if (!draggedNode) {
+          return [nodeId, { x: 0, y: 0 }] satisfies [string, Point];
+        }
+
+        return [
+          nodeId,
+          getNodePosition(draggedNode, positionOverrides),
+        ] satisfies [string, Point];
+      }),
+    );
 
     setDragState({
-      nodeId: node._id,
+      rootNodeId: node._id,
+      draggedNodeIds,
       pointerId: event.pointerId,
       startPointer: { x: event.clientX, y: event.clientY },
-      startPosition: currentPosition,
+      startPositions,
       moved: false,
     });
     setPositionOverrides((currentOverrides) => ({
       ...currentOverrides,
-      [node._id]: currentPosition,
+      ...startPositions,
     }));
   }
 
@@ -1872,6 +1931,128 @@ function getPreviewStartPoint(
   }
 
   return getAnchorPoint(getNodeRect(node, positionOverrides, nodeSizes), targetPoint);
+}
+
+function getMoveGroupNodeIds(
+  nodes: NodeDoc[],
+  connections: ConnectionDoc[],
+  rootNodeId: Id<"nodes">,
+): Id<"nodes">[] {
+  const rootNode = nodes.find((node) => node._id === rootNodeId);
+
+  if (!rootNode || rootNode.label !== "source") {
+    return [rootNodeId];
+  }
+
+  const nodeById = new Map(nodes.map((node) => [node._id, node] as const));
+  const sourceNodeIds = new Set<Id<"nodes">>();
+  const childIdsByParentId = new Map<Id<"nodes">, Id<"nodes">[]>();
+  const adjacencyByNodeId = new Map<Id<"nodes">, Set<Id<"nodes">>>();
+
+  for (const node of nodes) {
+    adjacencyByNodeId.set(node._id, new Set());
+
+    if (node.label !== "source") {
+      continue;
+    }
+
+    sourceNodeIds.add(node._id);
+
+    if (!node.sourceParentId || node.sourceParentId === node._id) {
+      continue;
+    }
+
+    const childIds = childIdsByParentId.get(node.sourceParentId) ?? [];
+    childIds.push(node._id);
+    childIdsByParentId.set(node.sourceParentId, childIds);
+  }
+
+  for (const connection of connections) {
+    adjacencyByNodeId.get(connection.from)?.add(connection.to);
+    adjacencyByNodeId.get(connection.to)?.add(connection.from);
+  }
+
+  const subtreeNodeIds: Id<"nodes">[] = [];
+  const stack: Id<"nodes">[] = [rootNodeId];
+  const visited = new Set<Id<"nodes">>();
+
+  while (stack.length > 0) {
+    const nodeId = stack.pop();
+
+    if (!nodeId || visited.has(nodeId) || !sourceNodeIds.has(nodeId)) {
+      continue;
+    }
+
+    visited.add(nodeId);
+    subtreeNodeIds.push(nodeId);
+
+    const childIds = childIdsByParentId.get(nodeId) ?? [];
+
+    for (let index = childIds.length - 1; index >= 0; index -= 1) {
+      stack.push(childIds[index]);
+    }
+  }
+
+  const moveGroupNodeIds = [...subtreeNodeIds];
+  const moveGroupNodeIdSet = new Set(moveGroupNodeIds);
+  const queue = [...subtreeNodeIds];
+
+  const enqueueSourceBranch = (sourceNodeId: Id<"nodes">) => {
+    const sourceQueue: Id<"nodes">[] = [sourceNodeId];
+
+    while (sourceQueue.length > 0) {
+      const currentSourceNodeId = sourceQueue.pop();
+
+      if (
+        !currentSourceNodeId ||
+        moveGroupNodeIdSet.has(currentSourceNodeId) ||
+        !sourceNodeIds.has(currentSourceNodeId)
+      ) {
+        continue;
+      }
+
+      moveGroupNodeIdSet.add(currentSourceNodeId);
+      moveGroupNodeIds.push(currentSourceNodeId);
+      queue.push(currentSourceNodeId);
+
+      const childIds = childIdsByParentId.get(currentSourceNodeId) ?? [];
+
+      for (let index = childIds.length - 1; index >= 0; index -= 1) {
+        sourceQueue.push(childIds[index]);
+      }
+    }
+  };
+
+  while (queue.length > 0) {
+    const nodeId = queue.shift();
+
+    if (!nodeId) {
+      continue;
+    }
+
+    for (const neighborId of adjacencyByNodeId.get(nodeId) ?? []) {
+      if (moveGroupNodeIdSet.has(neighborId)) {
+        continue;
+      }
+
+      const neighbor = nodeById.get(neighborId);
+
+      if (!neighbor) {
+        continue;
+      }
+
+      if (neighbor.label === "source") {
+        enqueueSourceBranch(neighborId);
+        continue;
+      }
+
+      moveGroupNodeIdSet.add(neighborId);
+      moveGroupNodeIds.push(neighborId);
+      queue.push(neighborId);
+    }
+  }
+
+  return moveGroupNodeIds;
 }
 
 function getNodeLabel(node: Pick<NodeDoc, "label">): NodeLabel {

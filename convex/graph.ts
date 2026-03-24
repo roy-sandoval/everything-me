@@ -18,6 +18,128 @@ const nodeLabelValidator = v.union(
   v.literal("realization"),
 );
 
+function getMoveGroupNodeIds(
+  nodes: Doc<"nodes">[],
+  connections: Doc<"connections">[],
+  rootNodeId: Id<"nodes">,
+): Id<"nodes">[] {
+  const rootNode = nodes.find((node) => node._id === rootNodeId);
+
+  if (!rootNode || rootNode.label !== "source") {
+    return [];
+  }
+
+  const nodeById = new Map(nodes.map((node) => [node._id, node] as const));
+  const sourceNodeIds = new Set<Id<"nodes">>();
+  const childIdsByParentId = new Map<Id<"nodes">, Id<"nodes">[]>();
+  const adjacencyByNodeId = new Map<Id<"nodes">, Set<Id<"nodes">>>();
+
+  for (const node of nodes) {
+    adjacencyByNodeId.set(node._id, new Set());
+
+    if (node.label !== "source") {
+      continue;
+    }
+
+    sourceNodeIds.add(node._id);
+
+    if (!node.sourceParentId || node.sourceParentId === node._id) {
+      continue;
+    }
+
+    const childIds = childIdsByParentId.get(node.sourceParentId) ?? [];
+    childIds.push(node._id);
+    childIdsByParentId.set(node.sourceParentId, childIds);
+  }
+
+  for (const connection of connections) {
+    adjacencyByNodeId.get(connection.from)?.add(connection.to);
+    adjacencyByNodeId.get(connection.to)?.add(connection.from);
+  }
+
+  const subtreeNodeIds: Id<"nodes">[] = [];
+  const stack: Id<"nodes">[] = [rootNodeId];
+  const visited = new Set<Id<"nodes">>();
+
+  while (stack.length > 0) {
+    const nodeId = stack.pop();
+
+    if (!nodeId || visited.has(nodeId) || !sourceNodeIds.has(nodeId)) {
+      continue;
+    }
+
+    visited.add(nodeId);
+    subtreeNodeIds.push(nodeId);
+
+    const childIds = childIdsByParentId.get(nodeId) ?? [];
+
+    for (let index = childIds.length - 1; index >= 0; index -= 1) {
+      stack.push(childIds[index]);
+    }
+  }
+
+  const moveGroupNodeIds = [...subtreeNodeIds];
+  const moveGroupNodeIdSet = new Set(moveGroupNodeIds);
+  const queue = [...subtreeNodeIds];
+
+  const enqueueSourceBranch = (sourceNodeId: Id<"nodes">) => {
+    const sourceQueue: Id<"nodes">[] = [sourceNodeId];
+
+    while (sourceQueue.length > 0) {
+      const currentSourceNodeId = sourceQueue.pop();
+
+      if (
+        !currentSourceNodeId ||
+        moveGroupNodeIdSet.has(currentSourceNodeId) ||
+        !sourceNodeIds.has(currentSourceNodeId)
+      ) {
+        continue;
+      }
+
+      moveGroupNodeIdSet.add(currentSourceNodeId);
+      moveGroupNodeIds.push(currentSourceNodeId);
+      queue.push(currentSourceNodeId);
+
+      const childIds = childIdsByParentId.get(currentSourceNodeId) ?? [];
+
+      for (let index = childIds.length - 1; index >= 0; index -= 1) {
+        sourceQueue.push(childIds[index]);
+      }
+    }
+  };
+
+  while (queue.length > 0) {
+    const nodeId = queue.shift();
+
+    if (!nodeId) {
+      continue;
+    }
+
+    for (const neighborId of adjacencyByNodeId.get(nodeId) ?? []) {
+      if (moveGroupNodeIdSet.has(neighborId)) {
+        continue;
+      }
+
+      const neighbor = nodeById.get(neighborId);
+
+      if (!neighbor) {
+        continue;
+      }
+
+      if (neighbor.label === "source") {
+        enqueueSourceBranch(neighborId);
+        continue;
+      }
+
+      moveGroupNodeIdSet.add(neighborId);
+      moveGroupNodeIds.push(neighborId);
+      queue.push(neighborId);
+    }
+  }
+
+  return moveGroupNodeIds;
+}
+
 export const getCanvas = query({
   args: {},
   handler: async (ctx): Promise<{
@@ -72,10 +194,48 @@ export const moveNode = mutation({
       throw new Error("Node not found.");
     }
 
-    await ctx.db.patch(args.nodeId, {
-      x: args.x,
-      y: args.y,
-    });
+    const delta = {
+      x: args.x - node.x,
+      y: args.y - node.y,
+    };
+
+    if (node.label !== "source") {
+      await ctx.db.patch(args.nodeId, {
+        x: args.x,
+        y: args.y,
+      });
+
+      return null;
+    }
+
+    const [nodes, connections] = await Promise.all([
+      ctx.db.query("nodes").take(MAX_NODES),
+      ctx.db.query("connections").take(MAX_CONNECTIONS),
+    ]);
+    const nodeById = new Map(nodes.map((currentNode) => [currentNode._id, currentNode]));
+    const subtreeNodeIds = getMoveGroupNodeIds(nodes, connections, args.nodeId);
+
+    if (subtreeNodeIds.length === 0) {
+      await ctx.db.patch(args.nodeId, {
+        x: args.x,
+        y: args.y,
+      });
+
+      return null;
+    }
+
+    for (const nodeId of subtreeNodeIds) {
+      const currentNode = nodeById.get(nodeId);
+
+      if (!currentNode) {
+        continue;
+      }
+
+      await ctx.db.patch(nodeId, {
+        x: currentNode.x + delta.x,
+        y: currentNode.y + delta.y,
+      });
+    }
 
     return null;
   },
