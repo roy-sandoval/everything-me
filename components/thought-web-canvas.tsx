@@ -14,6 +14,12 @@ import { useMutation, useQuery } from "convex/react";
 
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import {
+  extractionResponseSchema,
+  type ExtractedConnection,
+  type ExtractedNode,
+} from "@/lib/extraction";
+import type { NodeLabel } from "@/lib/node-labels";
 import { cn } from "@/lib/utils";
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
@@ -27,7 +33,55 @@ const MAX_VIEWPORT_SCALE = 2.5;
 const PAN_GESTURE_THRESHOLD = 3;
 const WHEEL_ZOOM_SENSITIVITY = 0.0015;
 
-type NodeDoc = Doc<"nodes">;
+const NODE_LABEL_STYLES: Record<
+  NodeLabel,
+  {
+    badgeLabel: string;
+    badgeClassName: string;
+    borderClassName: string;
+    connectorClassName: string;
+  }
+> = {
+  source: {
+    badgeLabel: "Source",
+    badgeClassName: "bg-sky-300/15 text-sky-100",
+    borderClassName: "border-sky-300/30",
+    connectorClassName:
+      "border-sky-200/60 bg-sky-300/15 text-sky-100 hover:bg-sky-300/25",
+  },
+  note: {
+    badgeLabel: "Note",
+    badgeClassName: "bg-white/10 text-white/72",
+    borderClassName: "border-white/12",
+    connectorClassName:
+      "border-cyan-200/60 bg-cyan-300/15 text-cyan-100 hover:bg-cyan-300/25",
+  },
+  experience: {
+    badgeLabel: "Experience",
+    badgeClassName: "bg-rose-300/15 text-rose-100",
+    borderClassName: "border-rose-300/30",
+    connectorClassName:
+      "border-rose-200/60 bg-rose-300/15 text-rose-100 hover:bg-rose-300/25",
+  },
+  learning: {
+    badgeLabel: "Learning",
+    badgeClassName: "bg-emerald-300/15 text-emerald-100",
+    borderClassName: "border-emerald-300/32",
+    connectorClassName:
+      "border-emerald-200/60 bg-emerald-300/15 text-emerald-100 hover:bg-emerald-300/25",
+  },
+  realization: {
+    badgeLabel: "Realization",
+    badgeClassName: "bg-amber-300/18 text-amber-50",
+    borderClassName: "border-amber-300/30",
+    connectorClassName:
+      "border-amber-200/60 bg-amber-300/15 text-amber-50 hover:bg-amber-300/25",
+  },
+};
+
+type NodeDoc = Doc<"nodes"> & {
+  label?: NodeLabel;
+};
 type ConnectionDoc = Doc<"connections">;
 
 type Point = {
@@ -97,6 +151,7 @@ function ConnectedThoughtWebCanvas() {
   const updateNode = useMutation(api.graph.updateNode);
   const deleteNode = useMutation(api.graph.deleteNode);
   const createConnection = useMutation(api.graph.createConnection);
+  const importExtraction = useMutation(api.graph.importExtraction);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -130,6 +185,10 @@ function ConnectedThoughtWebCanvas() {
     origin: { x: 0, y: 0 },
     scale: 1,
   });
+  const [extractInput, setExtractInput] = useState("");
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractFeedback, setExtractFeedback] = useState<string | null>(null);
+  const [isExtracting, setIsExtracting] = useState(false);
 
   const nodes = canvas?.nodes ?? [];
   const connections = canvas?.connections ?? [];
@@ -434,6 +493,7 @@ function ConnectedThoughtWebCanvas() {
     try {
       await createNode({
         text,
+        label: "note",
         x: composer.x,
         y: composer.y,
       });
@@ -497,6 +557,68 @@ function ConnectedThoughtWebCanvas() {
       );
     } finally {
       setIsSavingEdit(false);
+    }
+  }
+
+  async function handleExtract() {
+    const text = extractInput.trim();
+
+    if (!text || isExtracting) {
+      setExtractError("Paste some text before extracting.");
+      setExtractFeedback(null);
+      return;
+    }
+
+    setIsExtracting(true);
+    setExtractError(null);
+    setExtractFeedback(null);
+    setSaveError(null);
+
+    try {
+      const response = await fetch("/api/extract", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok) {
+        throw new Error(
+          getErrorMessage(payload) ?? "Could not extract nodes from that text.",
+        );
+      }
+
+      const parsedPayload = extractionResponseSchema.safeParse(payload);
+
+      if (!parsedPayload.success) {
+        throw new Error("The extraction response was not valid.");
+      }
+
+      const positionedNodes = createExtractionNodePlacements(
+        parsedPayload.data.nodes,
+        parsedPayload.data.connections,
+        canvasRef.current,
+        viewportRef.current,
+      );
+      const result = await importExtraction({
+        nodes: positionedNodes,
+        connections: parsedPayload.data.connections,
+      });
+
+      setExtractInput("");
+      setExtractFeedback(
+        `Imported ${result.nodeCount} nodes and ${result.connectionCount} connections.`,
+      );
+    } catch (error) {
+      setExtractError(
+        error instanceof Error
+          ? error.message
+          : "Could not extract nodes from that text.",
+      );
+    } finally {
+      setIsExtracting(false);
     }
   }
 
@@ -1008,10 +1130,28 @@ function ConnectedThoughtWebCanvas() {
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-6">
         <div className="rounded-full border border-white/10 bg-black/25 px-4 py-2 text-xs uppercase tracking-[0.28em] text-white/70 backdrop-blur-sm">
-          Double-click canvas to make a node. Double-click a node to edit. Drag
-          to pan. Scroll to zoom.
+          Paste to extract. Double-click to make a node. Drag to pan. Scroll to
+          zoom.
         </div>
       </div>
+
+      <ExtractorPanel
+        value={extractInput}
+        error={extractError}
+        feedback={extractFeedback}
+        disabled={isExtracting}
+        onChange={(value) => {
+          setExtractInput(value);
+          setExtractError(null);
+          setExtractFeedback(null);
+        }}
+        onClear={() => {
+          setExtractInput("");
+          setExtractError(null);
+          setExtractFeedback(null);
+        }}
+        onSubmit={() => void handleExtract()}
+      />
 
       <div className="pointer-events-none absolute bottom-0 left-0 z-10 px-6 pb-6">
         <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white/70 backdrop-blur-sm">
@@ -1070,6 +1210,8 @@ function NodeCard({
 }) {
   const cardRef = useRef<HTMLElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const label = getNodeLabel(node);
+  const labelStyle = NODE_LABEL_STYLES[label];
 
   useEffect(() => {
     const element = cardRef.current;
@@ -1114,7 +1256,7 @@ function NodeCard({
         isEditing ? "cursor-text" : "cursor-grab active:cursor-grabbing",
         isConnectionSource
           ? "border-cyan-300/65 shadow-[0_0_0_1px_rgba(123,239,229,0.3),0_16px_45px_rgba(0,0,0,0.35)]"
-          : "border-white/12",
+          : labelStyle.borderClassName,
         isConnectionTarget && "ring-2 ring-cyan-300/65 ring-offset-0",
         isDeleting && "opacity-60",
       )}
@@ -1127,6 +1269,16 @@ function NodeCard({
       onDoubleClick={() => onDoubleClick(node)}
       onContextMenu={(event) => onContextMenu(node._id, event)}
     >
+      <div className="mb-3 flex items-center gap-2">
+        <span
+          className={cn(
+            "rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.22em]",
+            labelStyle.badgeClassName,
+          )}
+        >
+          {labelStyle.badgeLabel}
+        </span>
+      </div>
       {isEditing ? (
         <div onPointerDown={(event) => event.stopPropagation()}>
           <textarea
@@ -1157,7 +1309,10 @@ function NodeCard({
       {!isEditing ? (
         <button
           type="button"
-          className="absolute top-1/2 right-[-10px] flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full border border-cyan-200/60 bg-cyan-300/15 text-cyan-100 transition hover:scale-105 hover:bg-cyan-300/25"
+          className={cn(
+            "absolute top-1/2 right-[-10px] flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full border transition hover:scale-105",
+            labelStyle.connectorClassName,
+          )}
           onPointerDown={(event) => onConnectionPointerDown(node._id, event)}
           aria-label={`Start a connection from ${node.text}`}
         >
@@ -1220,6 +1375,75 @@ function InlineTextCard({
         >
           {buttonLabel}
         </button>
+      </div>
+    </div>
+  );
+}
+
+function ExtractorPanel({
+  value,
+  error,
+  feedback,
+  disabled,
+  onChange,
+  onClear,
+  onSubmit,
+}: {
+  value: string;
+  error: string | null;
+  feedback: string | null;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onClear: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="absolute top-6 right-6 z-20 w-[min(28rem,calc(100vw-3rem))]">
+      <div
+        className="pointer-events-auto rounded-[1.7rem] border border-white/12 bg-[rgb(10_14_24_/_0.92)] p-4 shadow-[0_24px_70px_rgba(0,0,0,0.38)] backdrop-blur-md"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-[0.28em] text-cyan-100/70">
+              Conversation Extractor
+            </p>
+            <h2 className="mt-2 text-lg leading-tight font-semibold text-white">
+              Paste anything. Pull out the shape.
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClear}
+            disabled={disabled || value.length === 0}
+            className="rounded-full border border-white/10 px-3 py-1.5 text-xs font-medium text-white/70 transition hover:border-white/18 hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Clear
+          </button>
+        </div>
+
+        <textarea
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Paste a Claude conversation, voice note transcript, journal entry, or any other text."
+          className="mt-4 min-h-48 w-full rounded-[1.35rem] border border-white/10 bg-white/[0.04] px-4 py-3 text-sm leading-6 text-white outline-none transition placeholder:text-white/35 focus:border-cyan-200/35"
+        />
+
+        <div className="mt-4 flex items-center justify-between gap-4">
+          <p className="text-sm leading-6 text-white/62">
+            {error ??
+              feedback ??
+              "Aim for a few paragraphs or a full conversation. The import appends a new cluster to your current canvas."}
+          </p>
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={disabled}
+            className="shrink-0 rounded-full bg-cyan-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:scale-[1.01] hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {disabled ? "Extracting..." : "Extract"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -1441,6 +1665,82 @@ function getPreviewStartPoint(
   }
 
   return getAnchorPoint(getNodeRect(node, positionOverrides, nodeSizes), targetPoint);
+}
+
+function getNodeLabel(node: Pick<NodeDoc, "label">): NodeLabel {
+  return node.label ?? "note";
+}
+
+function getErrorMessage(payload: unknown) {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "error" in payload &&
+    typeof payload.error === "string"
+  ) {
+    return payload.error;
+  }
+
+  return null;
+}
+
+function createExtractionNodePlacements(
+  nodes: ExtractedNode[],
+  connections: ExtractedConnection[],
+  canvas: HTMLDivElement | null,
+  viewport: ViewportState,
+) {
+  const bounds = getVisibleWorldBounds(canvas, viewport);
+  const center = bounds
+    ? {
+        x: (bounds.left + bounds.right) / 2,
+        y: (bounds.top + bounds.bottom) / 2,
+      }
+    : {
+        x: viewport.origin.x + 420,
+        y: viewport.origin.y + 280,
+      };
+  const degreeByNodeId = new Map<string, number>();
+
+  for (const node of nodes) {
+    degreeByNodeId.set(node.clientId, 0);
+  }
+
+  for (const connection of connections) {
+    degreeByNodeId.set(
+      connection.fromClientId,
+      (degreeByNodeId.get(connection.fromClientId) ?? 0) + 1,
+    );
+    degreeByNodeId.set(
+      connection.toClientId,
+      (degreeByNodeId.get(connection.toClientId) ?? 0) + 1,
+    );
+  }
+
+  return [...nodes]
+    .sort((left, right) => {
+      const degreeDelta =
+        (degreeByNodeId.get(right.clientId) ?? 0) -
+        (degreeByNodeId.get(left.clientId) ?? 0);
+
+      if (degreeDelta !== 0) {
+        return degreeDelta;
+      }
+
+      return left.text.localeCompare(right.text);
+    })
+    .map((node, index) => {
+      const angle = index * (Math.PI * (3 - Math.sqrt(5)));
+      const radius = 36 + Math.sqrt(index + 1) * 138;
+      const jitterX = Math.sin(index * 1.37) * 18;
+      const jitterY = Math.cos(index * 1.11) * 14;
+
+      return {
+        ...node,
+        x: center.x + Math.cos(angle) * radius + jitterX,
+        y: center.y + Math.sin(angle) * radius * 0.76 + jitterY,
+      };
+    });
 }
 
 function getRectCenter(rect: {

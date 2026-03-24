@@ -6,6 +6,15 @@ import { mutation, query } from "./_generated/server";
 const MAX_NODES = 500;
 const MAX_CONNECTIONS = 1_500;
 const MAX_CONNECTIONS_PER_NODE = 500;
+const MAX_IMPORT_NODES = 30;
+const MAX_IMPORT_CONNECTIONS = 90;
+const nodeLabelValidator = v.union(
+  v.literal("source"),
+  v.literal("note"),
+  v.literal("experience"),
+  v.literal("learning"),
+  v.literal("realization"),
+);
 
 export const getCanvas = query({
   args: {},
@@ -26,6 +35,7 @@ export const getCanvas = query({
 export const createNode = mutation({
   args: {
     text: v.string(),
+    label: v.optional(nodeLabelValidator),
     x: v.number(),
     y: v.number(),
   },
@@ -38,6 +48,7 @@ export const createNode = mutation({
 
     return await ctx.db.insert("nodes", {
       text,
+      label: args.label ?? "note",
       x: args.x,
       y: args.y,
       createdAt: Date.now(),
@@ -141,6 +152,97 @@ export const createConnection = mutation({
     });
 
     return null;
+  },
+});
+
+export const importExtraction = mutation({
+  args: {
+    nodes: v.array(
+      v.object({
+        clientId: v.string(),
+        text: v.string(),
+        label: nodeLabelValidator,
+        x: v.number(),
+        y: v.number(),
+      }),
+    ),
+    connections: v.array(
+      v.object({
+        fromClientId: v.string(),
+        toClientId: v.string(),
+      }),
+    ),
+  },
+  returns: v.object({
+    nodeCount: v.number(),
+    connectionCount: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const insertedNodes = new Map<string, Id<"nodes">>();
+    const dedupedTexts = new Set<string>();
+    let nodeCount = 0;
+
+    for (const node of args.nodes) {
+      if (nodeCount >= MAX_IMPORT_NODES) {
+        break;
+      }
+
+      const text = node.text.trim();
+      const dedupeKey = text.toLocaleLowerCase();
+
+      if (!text || !node.clientId || dedupedTexts.has(dedupeKey)) {
+        continue;
+      }
+
+      const nodeId = await ctx.db.insert("nodes", {
+        text,
+        label: node.label,
+        x: node.x,
+        y: node.y,
+        createdAt: Date.now(),
+      });
+
+      dedupedTexts.add(dedupeKey);
+      insertedNodes.set(node.clientId, nodeId);
+      nodeCount += 1;
+    }
+
+    const seenConnections = new Set<string>();
+    let connectionCount = 0;
+
+    for (const connection of args.connections) {
+      if (connectionCount >= MAX_IMPORT_CONNECTIONS) {
+        break;
+      }
+
+      const fromNodeId = insertedNodes.get(connection.fromClientId);
+      const toNodeId = insertedNodes.get(connection.toClientId);
+
+      if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) {
+        continue;
+      }
+
+      const connectionKey = [fromNodeId, toNodeId].sort().join(":");
+
+      if (seenConnections.has(connectionKey)) {
+        continue;
+      }
+
+      seenConnections.add(connectionKey);
+
+      await ctx.db.insert("connections", {
+        from: fromNodeId,
+        to: toNodeId,
+        createdAt: Date.now(),
+      });
+
+      connectionCount += 1;
+    }
+
+    return {
+      nodeCount,
+      connectionCount,
+    };
   },
 });
 
