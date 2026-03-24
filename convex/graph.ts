@@ -162,6 +162,7 @@ export const importExtraction = mutation({
         clientId: v.string(),
         text: v.string(),
         label: nodeLabelValidator,
+        parentSourceClientId: v.optional(v.string()),
         x: v.number(),
         y: v.number(),
       }),
@@ -179,6 +180,8 @@ export const importExtraction = mutation({
   }),
   handler: async (ctx, args) => {
     const insertedNodes = new Map<string, Id<"nodes">>();
+    const insertedNodeLabels = new Map<string, Doc<"nodes">["label"]>();
+    const pendingSourceParents = new Map<string, string>();
     const dedupedTexts = new Set<string>();
     let nodeCount = 0;
 
@@ -204,7 +207,32 @@ export const importExtraction = mutation({
 
       dedupedTexts.add(dedupeKey);
       insertedNodes.set(node.clientId, nodeId);
+      insertedNodeLabels.set(node.clientId, node.label);
+
+      if (node.label === "source" && node.parentSourceClientId) {
+        pendingSourceParents.set(node.clientId, node.parentSourceClientId);
+      }
+
       nodeCount += 1;
+    }
+
+    for (const [clientId, parentClientId] of pendingSourceParents) {
+      const nodeId = insertedNodes.get(clientId);
+      const parentNodeId = insertedNodes.get(parentClientId);
+
+      if (
+        !nodeId ||
+        !parentNodeId ||
+        nodeId === parentNodeId ||
+        insertedNodeLabels.get(clientId) !== "source" ||
+        insertedNodeLabels.get(parentClientId) !== "source"
+      ) {
+        continue;
+      }
+
+      await ctx.db.patch(nodeId, {
+        sourceParentId: parentNodeId,
+      });
     }
 
     const seenConnections = new Set<string>();

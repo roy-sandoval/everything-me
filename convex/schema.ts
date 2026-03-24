@@ -13,6 +13,7 @@ export default defineSchema({
   nodes: defineTable({
     text: v.string(),
     label: v.optional(nodeLabelValidator),
+    sourceParentId: v.optional(v.id("nodes")),
     x: v.number(),
     y: v.number(),
     createdAt: v.number(),

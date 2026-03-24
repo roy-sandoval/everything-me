@@ -1433,7 +1433,7 @@ function ExtractorPanel({
           <p className="text-sm leading-6 text-white/62">
             {error ??
               feedback ??
-              "Aim for a few paragraphs or a full conversation. The import appends a new cluster to your current canvas."}
+              "Aim for a few paragraphs or a full conversation. The import appends a source-organized cluster to your current canvas."}
           </p>
           <button
             type="button"
@@ -1701,9 +1701,12 @@ function createExtractionNodePlacements(
         y: viewport.origin.y + 280,
       };
   const degreeByNodeId = new Map<string, number>();
+  const adjacencyByNodeId = new Map<string, Set<string>>();
+  const nodeById = new Map(nodes.map((node) => [node.clientId, node] as const));
 
   for (const node of nodes) {
     degreeByNodeId.set(node.clientId, 0);
+    adjacencyByNodeId.set(node.clientId, new Set());
   }
 
   for (const connection of connections) {
@@ -1715,32 +1718,247 @@ function createExtractionNodePlacements(
       connection.toClientId,
       (degreeByNodeId.get(connection.toClientId) ?? 0) + 1,
     );
+    adjacencyByNodeId.get(connection.fromClientId)?.add(connection.toClientId);
+    adjacencyByNodeId.get(connection.toClientId)?.add(connection.fromClientId);
   }
 
-  return [...nodes]
-    .sort((left, right) => {
-      const degreeDelta =
-        (degreeByNodeId.get(right.clientId) ?? 0) -
-        (degreeByNodeId.get(left.clientId) ?? 0);
+  const sortNodes = (left: ExtractedNode, right: ExtractedNode) => {
+    const degreeDelta =
+      (degreeByNodeId.get(right.clientId) ?? 0) -
+      (degreeByNodeId.get(left.clientId) ?? 0);
 
-      if (degreeDelta !== 0) {
-        return degreeDelta;
+    if (degreeDelta !== 0) {
+      return degreeDelta;
+    }
+
+    return left.text.localeCompare(right.text);
+  };
+  const sourceNodes = nodes.filter((node) => node.label === "source");
+  const validSourceParentById = new Map<string, string>();
+  const sourceChildrenById = new Map<string, ExtractedNode[]>();
+
+  for (const sourceNode of sourceNodes) {
+    sourceChildrenById.set(sourceNode.clientId, []);
+  }
+
+  for (const sourceNode of sourceNodes) {
+    const parentId = sourceNode.parentSourceClientId;
+    const parentNode = parentId ? nodeById.get(parentId) : undefined;
+
+    if (!parentId || parentId === sourceNode.clientId || parentNode?.label !== "source") {
+      continue;
+    }
+
+    validSourceParentById.set(sourceNode.clientId, parentId);
+    sourceChildrenById.get(parentId)?.push(sourceNode);
+  }
+
+  for (const childNodes of sourceChildrenById.values()) {
+    childNodes.sort(sortNodes);
+  }
+
+  const sourceDepthCache = new Map<string, number>();
+  const getSourceDepth = (nodeId: string, seen = new Set<string>()): number => {
+    const cached = sourceDepthCache.get(nodeId);
+
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const parentId = validSourceParentById.get(nodeId);
+
+    if (!parentId || seen.has(nodeId)) {
+      sourceDepthCache.set(nodeId, 0);
+      return 0;
+    }
+
+    seen.add(nodeId);
+    const depth = getSourceDepth(parentId, seen) + 1;
+    seen.delete(nodeId);
+    sourceDepthCache.set(nodeId, depth);
+    return depth;
+  };
+  const positionedById = new Map<string, Point>();
+  const placedSourceIds = new Set<string>();
+  const topLevelSources = sourceNodes
+    .filter((node) => !validSourceParentById.has(node.clientId))
+    .sort(sortNodes);
+
+  const placeSourceBranch = (
+    sourceNode: ExtractedNode,
+    position: Point,
+    lineage: Set<string>,
+  ) => {
+    positionedById.set(sourceNode.clientId, position);
+    placedSourceIds.add(sourceNode.clientId);
+
+    const childNodes = sourceChildrenById.get(sourceNode.clientId) ?? [];
+
+    if (childNodes.length === 0) {
+      return;
+    }
+
+    const baseAngle =
+      position.x === center.x && position.y === center.y
+        ? getStableAngle(sourceNode.clientId)
+        : getPointAngle(center, position);
+    const spread = childNodes.length === 1 ? 0 : Math.min(2.2, 0.7 + childNodes.length * 0.44);
+    const radius = 190 + getSourceDepth(sourceNode.clientId) * 36;
+
+    for (const [index, childNode] of childNodes.entries()) {
+      if (lineage.has(childNode.clientId)) {
+        continue;
       }
 
-      return left.text.localeCompare(right.text);
-    })
-    .map((node, index) => {
-      const angle = index * (Math.PI * (3 - Math.sqrt(5)));
-      const radius = 36 + Math.sqrt(index + 1) * 138;
-      const jitterX = Math.sin(index * 1.37) * 18;
-      const jitterY = Math.cos(index * 1.11) * 14;
+      const angle =
+        childNodes.length === 1
+          ? baseAngle
+          : baseAngle - spread / 2 + (spread * index) / (childNodes.length - 1);
+      const jitter = (getStableAngle(childNode.clientId) - Math.PI) * 0.08;
+      const childPosition = {
+        x: position.x + Math.cos(angle + jitter) * radius,
+        y: position.y + Math.sin(angle + jitter) * radius * 0.82,
+      };
 
+      lineage.add(childNode.clientId);
+      placeSourceBranch(childNode, childPosition, lineage);
+      lineage.delete(childNode.clientId);
+    }
+  };
+
+  const rootSources = topLevelSources.length > 0 ? topLevelSources : [...sourceNodes].sort(sortNodes);
+  const sourceAnchorRadius =
+    rootSources.length <= 1 ? 0 : 240 + Math.sqrt(rootSources.length) * 56;
+
+  for (const [index, sourceNode] of rootSources.entries()) {
+    if (placedSourceIds.has(sourceNode.clientId)) {
+      continue;
+    }
+
+    const angle =
+      rootSources.length === 1
+        ? getStableAngle(sourceNode.clientId)
+        : -Math.PI / 2 + (index * Math.PI * 2) / rootSources.length;
+    const rootPosition = {
+      x: center.x + Math.cos(angle) * sourceAnchorRadius,
+      y: center.y + Math.sin(angle) * sourceAnchorRadius * 0.76,
+    };
+
+    placeSourceBranch(sourceNode, rootPosition, new Set([sourceNode.clientId]));
+  }
+
+  const anchoredNonSources = new Map<string, ExtractedNode[]>();
+  const fallbackNodes: ExtractedNode[] = [];
+
+  for (const node of nodes) {
+    if (node.label === "source") {
+      continue;
+    }
+
+    const sourceNeighbors = [...(adjacencyByNodeId.get(node.clientId) ?? [])]
+      .map((neighborId) => nodeById.get(neighborId))
+      .filter((neighbor): neighbor is ExtractedNode => neighbor?.label === "source");
+
+    if (sourceNeighbors.length === 0) {
+      fallbackNodes.push(node);
+      continue;
+    }
+
+    sourceNeighbors.sort((left, right) => {
+      const depthDelta = getSourceDepth(right.clientId) - getSourceDepth(left.clientId);
+
+      if (depthDelta !== 0) {
+        return depthDelta;
+      }
+
+      return sortNodes(left, right);
+    });
+
+    const anchorId = sourceNeighbors[0]?.clientId;
+
+    if (!anchorId || !positionedById.has(anchorId)) {
+      fallbackNodes.push(node);
+      continue;
+    }
+
+    const anchoredNodes = anchoredNonSources.get(anchorId) ?? [];
+    anchoredNodes.push(node);
+    anchoredNonSources.set(anchorId, anchoredNodes);
+  }
+
+  for (const [anchorId, anchoredNodes] of anchoredNonSources) {
+    anchoredNodes.sort(sortNodes);
+    const anchorPosition = positionedById.get(anchorId);
+
+    if (!anchorPosition) {
+      fallbackNodes.push(...anchoredNodes);
+      continue;
+    }
+
+    const baseAngle = getPointAngle(center, anchorPosition) + Math.PI / 2;
+
+    for (const [index, node] of anchoredNodes.entries()) {
+      const angle = baseAngle + index * (Math.PI * (3 - Math.sqrt(5)));
+      const radius = 144 + Math.sqrt(index + 1) * 76;
+
+      positionedById.set(node.clientId, {
+        x: anchorPosition.x + Math.cos(angle) * radius,
+        y: anchorPosition.y + Math.sin(angle) * radius * 0.84,
+      });
+    }
+  }
+
+  fallbackNodes.sort(sortNodes);
+
+  const fallbackRadiusBase =
+    sourceAnchorRadius + (sourceNodes.length > 0 ? 360 : 120);
+
+  for (const [index, node] of fallbackNodes.entries()) {
+    const angle = index * (Math.PI * (3 - Math.sqrt(5)));
+    const radius = fallbackRadiusBase + Math.sqrt(index + 1) * 110;
+    const jitterX = Math.sin(index * 1.37) * 18;
+    const jitterY = Math.cos(index * 1.11) * 14;
+
+    positionedById.set(node.clientId, {
+      x: center.x + Math.cos(angle) * radius + jitterX,
+      y: center.y + Math.sin(angle) * radius * 0.76 + jitterY,
+    });
+  }
+
+  return nodes.map((node, index) => {
+    const position = positionedById.get(node.clientId);
+
+    if (position) {
       return {
         ...node,
-        x: center.x + Math.cos(angle) * radius + jitterX,
-        y: center.y + Math.sin(angle) * radius * 0.76 + jitterY,
+        x: position.x,
+        y: position.y,
       };
-    });
+    }
+
+    const angle = index * (Math.PI * (3 - Math.sqrt(5)));
+    const radius = 36 + Math.sqrt(index + 1) * 138;
+
+    return {
+      ...node,
+      x: center.x + Math.cos(angle) * radius,
+      y: center.y + Math.sin(angle) * radius * 0.76,
+    };
+  });
+}
+
+function getPointAngle(origin: Point, target: Point) {
+  return Math.atan2(target.y - origin.y, target.x - origin.x);
+}
+
+function getStableAngle(value: string) {
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+
+  return (hash / 0xffffffff) * Math.PI * 2;
 }
 
 function getRectCenter(rect: {

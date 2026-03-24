@@ -21,12 +21,16 @@ Rules:
   - clientId: a short unique id like n1, n2, n3
   - text: a compact card label, usually 3 to 16 words, never empty
   - label: one of source, note, experience, learning, realization
+- Source nodes may also include:
+  - parentSourceClientId: another source node's clientId when this source is a narrower child of a broader source
 - Prefer short phrases over full sentences.
 - Remove duplicates and near-duplicates.
 - Preserve titles or references for source nodes.
+- Prefer broad top-level source nodes first, then attach narrower source nodes beneath them when the text clearly implies that hierarchy.
 - Only add connections when the relationship is meaningfully strong.
 - Connections should reference node ids using fromClientId and toClientId.
 - Do not connect a node to itself.
+- Do not assign parentSourceClientId to non-source nodes.
 - Do not include explanations outside the structured output.
 
 Label guide:
@@ -70,7 +74,6 @@ export async function POST(request: Request) {
       model: openai(OPENAI_MODEL),
       system: EXTRACTION_SYSTEM_PROMPT,
       prompt: `Extract a thought web from the following text:\n\n${parsedRequest.data.text}`,
-      temperature: 0.3,
       output: Output.object({
         schema: extractionResponseSchema,
       }),
