@@ -1,0 +1,112 @@
+#the-space-picker,
+#the-space-picker * {
+  box-sizing: border-box;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.ts-shell {
+  all: initial;
+  position: fixed;
+  z-index: 2147483647;
+}
+
+.ts-card {
+  width: 320px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at top, rgb(96 242 230 / 0.16), transparent 45%),
+    rgb(10 14 24 / 0.96);
+  padding: 16px;
+  color: rgb(241 245 249);
+  box-shadow: 0 24px 70px rgb(0 0 0 / 0.42);
+  backdrop-filter: blur(14px);
+}
+
+.ts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ts-kicker {
+  margin: 0;
+  color: rgb(186 230 253 / 0.75);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+}
+
+.ts-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 999px;
+  background: transparent;
+  color: rgb(241 245 249 / 0.78);
+  cursor: pointer;
+}
+
+.ts-text {
+  margin: 14px 0 0;
+  color: rgb(248 250 252 / 0.92);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.ts-label-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.ts-label {
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.04);
+  padding: 8px 12px;
+  color: rgb(226 232 240 / 0.82);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.ts-label[data-selected="true"] {
+  border-color: rgb(165 243 252 / 0.48);
+  background: rgb(103 232 249 / 0.16);
+  color: rgb(207 250 254);
+}
+
+.ts-error {
+  min-height: 18px;
+  margin: 14px 0 0;
+  color: rgb(254 202 202);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ts-add {
+  width: 100%;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(103 232 249);
+  padding: 11px 16px;
+  color: rgb(15 23 42);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ts-add:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}

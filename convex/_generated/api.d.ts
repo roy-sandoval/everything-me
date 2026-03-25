@@ -9,6 +9,8 @@
  */
 
 import type * as graph from "../graph.js";
+import type * as http from "../http.js";
+import type * as inbox from "../inbox.js";
 
 import type {
   ApiFromModules,
@@ -18,6 +20,8 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   graph: typeof graph;
+  http: typeof http;
+  inbox: typeof inbox;
 }>;
 
 /**

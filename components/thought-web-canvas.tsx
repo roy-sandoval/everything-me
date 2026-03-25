@@ -16,6 +16,7 @@ import { useMutation, useQuery } from "convex/react";
 
 import { api } from "@/convex/_generated/api";
 import type { Doc, Id } from "@/convex/_generated/dataModel";
+import { InboxPanel } from "@/components/inbox-panel";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,6 +42,7 @@ const COMPOSER_MARGIN = 16;
 const FALLBACK_NODE_SIZE = { width: 224, height: 96 };
 const CONTEXT_MENU_WIDTH = 168;
 const EXTRACTOR_SHELL_HEIGHT = 496;
+const FRESH_NODE_ANIMATION_MS = 1_600;
 const MIN_VIEWPORT_SCALE = 0.5;
 const MAX_VIEWPORT_SCALE = 2.5;
 const PAN_GESTURE_THRESHOLD = 3;
@@ -104,6 +106,12 @@ const NODE_LABEL_STYLES: Record<
 
 type NodeDoc = Doc<"nodes"> & {
   label?: NodeLabel;
+};
+type PendingNodeDoc = Doc<"nodes"> & {
+  label?: NodeLabel;
+  sourceUrl?: string;
+  sourceTitle?: string;
+  status: "pending" | "active";
 };
 type ConnectionDoc = Doc<"connections">;
 
@@ -175,6 +183,14 @@ type DateGroup = {
   nodes: NodeDoc[];
 };
 
+type SuggestConnectionResponse = {
+  suggestedNodeId: string | null;
+};
+
+const EMPTY_NODES: NodeDoc[] = [];
+const EMPTY_PENDING_NODES: PendingNodeDoc[] = [];
+const EMPTY_CONNECTIONS: ConnectionDoc[] = [];
+
 export function ThoughtWebCanvas() {
   if (!convexUrl) {
     return <MissingConvexState />;
@@ -185,6 +201,7 @@ export function ThoughtWebCanvas() {
 
 function ConnectedThoughtWebCanvas() {
   const canvas = useQuery(api.graph.getCanvas);
+  const pendingCanvasNodes = useQuery(api.inbox.listPending) as PendingNodeDoc[] | undefined;
   const createNode = useMutation(api.graph.createNode);
   const moveNode = useMutation(api.graph.moveNode);
   const updateNode = useMutation(api.graph.updateNode);
@@ -192,9 +209,12 @@ function ConnectedThoughtWebCanvas() {
   const clearCanvas = useMutation(api.graph.clearCanvas);
   const createConnection = useMutation(api.graph.createConnection);
   const importExtraction = useMutation(api.graph.importExtraction);
+  const activatePendingNode = useMutation(api.inbox.activatePendingNode);
+  const dismissPendingNode = useMutation(api.inbox.dismissPendingNode);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const manualConnectionSelectionRef = useRef<Record<string, boolean>>({});
   const skipCanvasClickRef = useRef(false);
   const dragStateRef = useRef<DragState | null>(null);
   const connectionStateRef = useRef<ConnectionState | null>(null);
@@ -232,11 +252,32 @@ function ConnectedThoughtWebCanvas() {
   const [extractFeedback, setExtractFeedback] = useState<string | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isExtractorOpen, setIsExtractorOpen] = useState(false);
+  const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("general");
   const [selectedNodeId, setSelectedNodeId] = useState<Id<"nodes"> | null>(null);
+  const [selectedConnectionIds, setSelectedConnectionIds] = useState<
+    Record<string, string>
+  >({});
+  const [manualConnectionSelection, setManualConnectionSelection] = useState<
+    Record<string, boolean>
+  >({});
+  const [suggestedConnectionIds, setSuggestedConnectionIds] = useState<
+    Record<string, string | null>
+  >({});
+  const [suggestionLoadingNodeIds, setSuggestionLoadingNodeIds] = useState<
+    Record<string, boolean>
+  >({});
+  const [busyActionByNodeId, setBusyActionByNodeId] = useState<
+    Record<string, "activate" | "dismiss" | undefined>
+  >({});
+  const [freshNodeIds, setFreshNodeIds] = useState<Record<string, boolean>>({});
 
-  const nodes = canvas?.nodes ?? [];
-  const connections = canvas?.connections ?? [];
+  const nodes = canvas?.nodes ?? EMPTY_NODES;
+  const connections = canvas?.connections ?? EMPTY_CONNECTIONS;
+  const pendingNodes = pendingCanvasNodes ?? EMPTY_PENDING_NODES;
+  const connectionOptions = [...nodes].sort((left, right) =>
+    left.text.localeCompare(right.text),
+  );
   const selectedNode =
     selectedNodeId ? nodes.find((node) => node._id === selectedNodeId) ?? null : null;
 
@@ -261,6 +302,10 @@ function ConnectedThoughtWebCanvas() {
   }, [viewport]);
 
   useEffect(() => {
+    manualConnectionSelectionRef.current = manualConnectionSelection;
+  }, [manualConnectionSelection]);
+
+  useEffect(() => {
     if (viewMode !== "date") {
       return;
     }
@@ -270,7 +315,149 @@ function ConnectedThoughtWebCanvas() {
     setContextMenu(null);
     setPanState(null);
     setIsExtractorOpen(false);
+    setIsInboxOpen(false);
   }, [viewMode]);
+
+  useEffect(() => {
+    const pendingNodeIds = new Set(pendingNodes.map((node) => String(node._id)));
+
+    const pruneMap = <T,>(currentValue: Record<string, T>) =>
+      Object.fromEntries(
+        Object.entries(currentValue).filter(([nodeId]) => pendingNodeIds.has(nodeId)),
+      ) as Record<string, T>;
+
+    setSelectedConnectionIds((currentValue) => pruneMap(currentValue));
+    setManualConnectionSelection((currentValue) => pruneMap(currentValue));
+    setSuggestedConnectionIds((currentValue) => pruneMap(currentValue));
+    setSuggestionLoadingNodeIds((currentValue) => pruneMap(currentValue));
+    setBusyActionByNodeId((currentValue) => pruneMap(currentValue));
+  }, [pendingNodes]);
+
+  useEffect(() => {
+    if (viewMode !== "general" || pendingNodes.length === 0 || nodes.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadSuggestions = async () => {
+      await Promise.all(
+        pendingNodes.map(async (pendingNode) => {
+          if (
+            suggestionLoadingNodeIds[pendingNode._id] ||
+            suggestedConnectionIds[pendingNode._id] !== undefined
+          ) {
+            return;
+          }
+
+          setSuggestionLoadingNodeIds((currentValue) => ({
+            ...currentValue,
+            [pendingNode._id]: true,
+          }));
+
+          try {
+            const response = await fetch("/api/suggest-connections", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                pendingNode: {
+                  text: pendingNode.text,
+                  label: pendingNode.label,
+                  sourceTitle: pendingNode.sourceTitle,
+                  sourceUrl: pendingNode.sourceUrl,
+                },
+                activeNodes: nodes.slice(0, 200).map((node) => ({
+                  id: node._id,
+                  text: node.text,
+                  label: node.label,
+                })),
+              }),
+            });
+
+            const payload = (await response.json().catch(() => null)) as
+              | SuggestConnectionResponse
+              | null;
+            const nextSuggestedNodeId =
+              response.ok && payload?.suggestedNodeId ? payload.suggestedNodeId : null;
+
+            if (cancelled) {
+              return;
+            }
+
+            setSuggestedConnectionIds((currentValue) => ({
+              ...currentValue,
+              [pendingNode._id]: nextSuggestedNodeId,
+            }));
+
+            setSelectedConnectionIds((currentValue) => {
+              if (manualConnectionSelectionRef.current[pendingNode._id]) {
+                return currentValue;
+              }
+
+              return {
+                ...currentValue,
+                [pendingNode._id]: nextSuggestedNodeId ?? "none",
+              };
+            });
+          } catch {
+            if (cancelled) {
+              return;
+            }
+
+            setSuggestedConnectionIds((currentValue) => ({
+              ...currentValue,
+              [pendingNode._id]: null,
+            }));
+            setSelectedConnectionIds((currentValue) => {
+              if (manualConnectionSelectionRef.current[pendingNode._id]) {
+                return currentValue;
+              }
+
+              return {
+                ...currentValue,
+                [pendingNode._id]: "none",
+              };
+            });
+          } finally {
+            if (!cancelled) {
+              setSuggestionLoadingNodeIds((currentValue) => ({
+                ...currentValue,
+                [pendingNode._id]: false,
+              }));
+            }
+          }
+        }),
+      );
+    };
+
+    void loadSuggestions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    nodes,
+    pendingNodes,
+    suggestedConnectionIds,
+    suggestionLoadingNodeIds,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (Object.keys(freshNodeIds).length === 0) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setFreshNodeIds({});
+    }, FRESH_NODE_ANIMATION_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [freshNodeIds]);
 
   useEffect(() => {
     if (!canvas) {
@@ -730,6 +917,95 @@ function ConnectedThoughtWebCanvas() {
       );
     } finally {
       setIsExtracting(false);
+    }
+  }
+
+  function handlePendingConnectionSelect(nodeId: string, nextValue: string) {
+    setSelectedConnectionIds((currentValue) => ({
+      ...currentValue,
+      [nodeId]: nextValue,
+    }));
+    setManualConnectionSelection((currentValue) => ({
+      ...currentValue,
+      [nodeId]: true,
+    }));
+  }
+
+  async function handleActivatePendingNode(nodeId: Id<"nodes">) {
+    if (busyActionByNodeId[nodeId]) {
+      return;
+    }
+
+    const viewportCenter = getViewportCenterWorldPoint(
+      canvasRef.current,
+      viewportRef.current,
+    ) ?? { x: 0, y: 0 };
+    const selectedConnectionId = selectedConnectionIds[nodeId] ?? "none";
+
+    setBusyActionByNodeId((currentValue) => ({
+      ...currentValue,
+      [nodeId]: "activate",
+    }));
+    setSaveError(null);
+
+    try {
+      const result = await activatePendingNode({
+        nodeId,
+        connectToNodeId:
+          selectedConnectionId !== "none"
+            ? (selectedConnectionId as Id<"nodes">)
+            : null,
+        viewportCenterX: viewportCenter.x,
+        viewportCenterY: viewportCenter.y,
+      });
+
+      setPositionOverrides((currentValue) => ({
+        ...currentValue,
+        [result.activatedNodeId]: { x: result.x, y: result.y },
+      }));
+      setFreshNodeIds((currentValue) => ({
+        ...currentValue,
+        [result.activatedNodeId]: true,
+      }));
+      setIsInboxOpen(false);
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? error.message
+          : "Could not add that pending node to the canvas.",
+      );
+    } finally {
+      setBusyActionByNodeId((currentValue) => ({
+        ...currentValue,
+        [nodeId]: undefined,
+      }));
+    }
+  }
+
+  async function handleDismissPendingNode(nodeId: Id<"nodes">) {
+    if (busyActionByNodeId[nodeId]) {
+      return;
+    }
+
+    setBusyActionByNodeId((currentValue) => ({
+      ...currentValue,
+      [nodeId]: "dismiss",
+    }));
+    setSaveError(null);
+
+    try {
+      await dismissPendingNode({ nodeId });
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? error.message
+          : "Could not dismiss that pending node.",
+      );
+    } finally {
+      setBusyActionByNodeId((currentValue) => ({
+        ...currentValue,
+        [nodeId]: undefined,
+      }));
     }
   }
 
@@ -1227,6 +1503,70 @@ function ConnectedThoughtWebCanvas() {
       onWheel={viewMode === "general" ? handleCanvasWheel : undefined}
     >
       {viewMode === "general" ? (
+        <>
+          <div className="pointer-events-none absolute top-24 left-6 bottom-6 z-30 hidden w-[22rem] xl:block">
+            <div className="pointer-events-auto h-full">
+              <InboxPanel
+                pendingNodes={pendingNodes}
+                activeNodes={connectionOptions}
+                selectedConnectionIds={selectedConnectionIds}
+                suggestedConnectionIds={suggestedConnectionIds}
+                suggestionLoadingNodeIds={suggestionLoadingNodeIds}
+                busyActionByNodeId={busyActionByNodeId}
+                onSelectConnection={handlePendingConnectionSelect}
+                onActivate={(nodeId) =>
+                  void handleActivatePendingNode(nodeId as Id<"nodes">)
+                }
+                onDismiss={(nodeId) =>
+                  void handleDismissPendingNode(nodeId as Id<"nodes">)
+                }
+              />
+            </div>
+          </div>
+
+          <div
+            className={cn(
+              "absolute inset-0 z-40 xl:hidden",
+              isInboxOpen ? "pointer-events-auto" : "pointer-events-none",
+            )}
+            aria-hidden={!isInboxOpen}
+          >
+            <button
+              type="button"
+              className={cn(
+                "absolute inset-0 bg-black/45 backdrop-blur-[1px] transition",
+                isInboxOpen ? "opacity-100" : "opacity-0",
+              )}
+              onClick={() => setIsInboxOpen(false)}
+              aria-label="Close inbox drawer"
+            />
+            <div
+              className={cn(
+                "absolute top-0 left-0 bottom-0 w-[min(24rem,calc(100vw-2rem))] p-4 transition duration-300 ease-out",
+                isInboxOpen ? "translate-x-0" : "-translate-x-full",
+              )}
+            >
+              <InboxPanel
+                pendingNodes={pendingNodes}
+                activeNodes={connectionOptions}
+                selectedConnectionIds={selectedConnectionIds}
+                suggestedConnectionIds={suggestedConnectionIds}
+                suggestionLoadingNodeIds={suggestionLoadingNodeIds}
+                busyActionByNodeId={busyActionByNodeId}
+                onSelectConnection={handlePendingConnectionSelect}
+                onActivate={(nodeId) =>
+                  void handleActivatePendingNode(nodeId as Id<"nodes">)
+                }
+                onDismiss={(nodeId) =>
+                  void handleDismissPendingNode(nodeId as Id<"nodes">)
+                }
+              />
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      {viewMode === "general" ? (
         <div
           className="pointer-events-none absolute inset-0"
           style={{
@@ -1306,6 +1646,7 @@ function ConnectedThoughtWebCanvas() {
               isDeleting={isDeletingNode === node._id}
               isSavingEdit={isSavingEdit && editState?.nodeId === node._id}
               isSelected={selectedNodeId === node._id}
+              isFresh={freshNodeIds[node._id] ?? false}
               onPointerDown={handleNodePointerDown}
               onSelect={handleNodeSelect}
               onDoubleClick={handleNodeDoubleClick}
@@ -1430,6 +1771,20 @@ function ConnectedThoughtWebCanvas() {
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-6">
         <div className="pointer-events-auto flex items-center gap-3 rounded-[1.2rem] border border-white/10 bg-black/30 px-3 py-3 text-white/75 backdrop-blur-sm">
+          {viewMode === "general" ? (
+            <>
+              <button
+                type="button"
+                className="xl:hidden rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-white transition hover:bg-white/[0.08]"
+                onClick={() => setIsInboxOpen(true)}
+              >
+                Inbox {pendingNodes.length > 0 ? `(${pendingNodes.length})` : ""}
+              </button>
+              <div className="hidden xl:block rounded-full border border-cyan-200/20 bg-cyan-300/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-cyan-100">
+                Inbox {pendingNodes.length}
+              </div>
+            </>
+          ) : null}
           <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.03] p-1">
             <button
               type="button"
@@ -1563,6 +1918,7 @@ function NodeCard({
   isDeleting,
   isSavingEdit,
   isSelected,
+  isFresh,
   onPointerDown,
   onSelect,
   onDoubleClick,
@@ -1584,6 +1940,7 @@ function NodeCard({
   isDeleting: boolean;
   isSavingEdit: boolean;
   isSelected: boolean;
+  isFresh: boolean;
   onPointerDown: (node: NodeDoc, event: ReactPointerEvent<HTMLElement>) => void;
   onSelect: (nodeId: Id<"nodes">) => void;
   onDoubleClick: (node: NodeDoc) => void;
@@ -1651,6 +2008,7 @@ function NodeCard({
           : labelStyle.borderClassName,
         isSelected && !isConnectionSource && "ring-2 ring-white/30 ring-offset-0",
         isConnectionTarget && "ring-2 ring-cyan-300/65 ring-offset-0",
+        isFresh && "canvas-node-arrival",
         isDeleting && "opacity-60",
       )}
       style={{
@@ -2101,6 +2459,22 @@ function getVisibleWorldBounds(
     top: viewport.origin.y + margin,
     right: viewport.origin.x + rect.width / viewport.scale - margin,
     bottom: viewport.origin.y + rect.height / viewport.scale - margin,
+  };
+}
+
+function getViewportCenterWorldPoint(
+  canvas: HTMLDivElement | null,
+  viewport: ViewportState,
+) {
+  if (!canvas) {
+    return null;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+
+  return {
+    x: viewport.origin.x + rect.width / viewport.scale / 2,
+    y: viewport.origin.y + rect.height / viewport.scale / 2,
   };
 }
 

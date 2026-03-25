@@ -92,8 +92,41 @@ textarea {
   }
 }
 
+@keyframes canvas-node-arrival {
+  from {
+    opacity: 0;
+    transform: translateY(22px) scale(0.94);
+  }
+
+  55% {
+    opacity: 1;
+    transform: translateY(-4px) scale(1.015);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.canvas-node-arrival {
+  animation: canvas-node-arrival 0.75s cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
   @keyframes canvas-stagger-in {
+    from {
+      opacity: 1;
+      transform: none;
+    }
+
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @keyframes canvas-node-arrival {
     from {
       opacity: 1;
       transform: none;

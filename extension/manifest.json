@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "The Space",
+  "version": "1.0.0",
+  "description": "Capture highlights into The Space without leaving the page.",
+  "permissions": ["contextMenus", "activeTab", "scripting"],
+  "host_permissions": ["https://strong-roadrunner-765.convex.site/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

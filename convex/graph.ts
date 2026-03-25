@@ -17,6 +17,7 @@ const nodeLabelValidator = v.union(
   v.literal("learning"),
   v.literal("realization"),
 );
+const nodeStatusValidator = v.union(v.literal("pending"), v.literal("active"));
 
 function getMoveGroupNodeIds(
   nodes: Doc<"nodes">[],
@@ -146,7 +147,10 @@ export const getCanvas = query({
     nodes: Doc<"nodes">[];
     connections: Doc<"connections">[];
   }> => {
-    const nodes = await ctx.db.query("nodes").take(MAX_NODES);
+    const nodes = await ctx.db
+      .query("nodes")
+      .withIndex("by_status", (q) => q.eq("status", "active"))
+      .take(MAX_NODES);
     const connections = await ctx.db.query("connections").take(MAX_CONNECTIONS);
 
     return {
@@ -173,6 +177,7 @@ export const createNode = mutation({
     return await ctx.db.insert("nodes", {
       text,
       label: args.label ?? "note",
+      status: "active",
       x: args.x,
       y: args.y,
       createdAt: Date.now(),
@@ -362,6 +367,7 @@ export const importExtraction = mutation({
       const nodeId = await ctx.db.insert("nodes", {
         text,
         label: node.label,
+        status: "active",
         x: node.x,
         y: node.y,
         createdAt: Date.now(),
@@ -516,3 +522,5 @@ export const clearCanvas = mutation({
     };
   },
 });
+
+export { nodeLabelValidator, nodeStatusValidator };
